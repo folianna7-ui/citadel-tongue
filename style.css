@@ -564,3 +564,61 @@
   .ct-toast { width: calc(100vw - 32px); }
   .ct-add-cats { display: none; }
 }
+
+/* ── Mobile fixes ─────────────────────────────────────────────────── */
+@media (max-width: 600px) {
+
+  /* Bottom sheet instead of centered popup */
+  .ct-tracker {
+    align-items: flex-end;
+    padding: 0;
+  }
+  .ct-tracker-inner {
+    border-radius: 16px 16px 0 0;
+    max-width: 100%;
+    max-height: 88vh;
+    animation: ctSlideUp 0.25s cubic-bezier(0.34,1.2,0.64,1);
+  }
+  @keyframes ctSlideUp {
+    from { transform: translateY(50px); opacity: 0; }
+    to   { transform: translateY(0);    opacity: 1; }
+  }
+
+  /* Edit modal — also bottom sheet */
+  .ct-edit-overlay {
+    align-items: flex-end;
+    padding: 0;
+  }
+  .ct-edit-box {
+    border-radius: 16px 16px 0 0;
+    max-width: 100%;
+    width: 100%;
+  }
+
+  /* Bigger tap targets */
+  .ct-edit-btn, .ct-del-btn { width: 32px; height: 32px; font-size: 13px; }
+  .ct-add-btn  { padding: 8px 14px; font-size: 13px; }
+  .ct-scan-btn { padding: 8px 12px !important; font-size: 13px !important; }
+  .ct-foot-btn { padding: 9px 4px; font-size: 13px; }
+  .ct-tr-add-input { padding: 8px 10px; font-size: 13px; }
+
+  /* Always show action buttons (no hover on mobile) */
+  .ct-wr-acts { opacity: 1; }
+
+  /* Hide category icons in add row — saves space */
+  .ct-add-cats { display: none; }
+
+  /* Toast — center bottom */
+  .ct-toast {
+    right: auto;
+    left: 50%;
+    bottom: 90px;
+    width: auto;
+    max-width: calc(100vw - 32px);
+    border-radius: 24px;
+    transform: translateX(-50%) translateY(20px);
+    transition: transform 0.3s cubic-bezier(0.34,1.4,0.64,1), opacity 0.25s;
+  }
+  .ct-toast.ct-in  { transform: translateX(-50%) translateY(0); opacity: 1; }
+  .ct-toast.ct-out { transform: translateX(-50%) translateY(20px); opacity: 0; }
+}
