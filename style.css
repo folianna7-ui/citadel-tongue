@@ -561,63 +561,76 @@
 
 
 @media (max-width: 600px) {
-  /* ── Tracker: compact centered modal ── */
-  .ct-tracker { padding: 10px; align-items: center; }
-
+  /* ── Tracker: top panel like native ST extensions ── */
+  .ct-tracker {
+    /* no backdrop overlay */
+    background: none;
+    backdrop-filter: none;
+    padding: 0;
+    align-items: flex-start;
+    justify-content: stretch;
+    /* sit below ST's top toolbar (~48px) */
+    top: 48px;
+    bottom: auto;
+  }
   .ct-tracker-inner {
-    border-radius: 13px;
-    max-height: 94vh;
-    width: 100%;
+    border-radius: 0 0 14px 14px;
+    border-top: none;
     max-width: 100%;
-    animation: ctPop 0.22s cubic-bezier(0.34,1.56,0.64,1);
+    width: 100%;
+    max-height: calc(100vh - 48px - 60px); /* leave room for ST bottom bar */
+    box-shadow: 0 8px 32px rgba(0,0,0,0.7);
+    animation: ctDropDown 0.2s ease-out;
+  }
+  @keyframes ctDropDown {
+    from { transform: translateY(-18px); opacity: 0; }
+    to   { transform: none; opacity: 1; }
   }
 
-  .ct-tr-header { padding: 12px 44px 8px 12px; }
-  .ct-tr-title  { font-size: 15px; }
-  .ct-tr-meta   { font-size: 11px; }
+  .ct-tr-header  { padding: 10px 44px 8px 12px; }
+  .ct-tr-title   { font-size: 15px; }
+  .ct-tr-meta    { font-size: 11px; }
+  .ct-tr-close   { top: 10px; right: 10px; }
 
-  .ct-tr-search-wrap { padding: 8px 10px 0; }
-  .ct-tr-search { font-size: 14px; padding: 9px 11px; }
+  .ct-tr-search-wrap { padding: 7px 10px 0; }
+  .ct-tr-search      { font-size: 14px; padding: 8px 11px; }
 
-  .ct-tr-tab { font-size: 13px; padding: 5px 12px 8px; }
+  .ct-tr-tabs   { padding: 7px 10px 0; }
+  .ct-tr-tab    { font-size: 13px; padding: 5px 12px 8px; }
 
-  .ct-cat-bar { padding: 6px 10px; gap: 4px; }
+  .ct-cat-bar   { padding: 6px 10px; }
 
-  .ct-tr-body { padding: 2px 10px 6px; }
-  .ct-word-row { padding: 11px 6px; }
-  .ct-wr-word  { font-size: 14px; }
-  .ct-wr-def   { font-size: 12px; }
+  .ct-tr-body   { padding: 2px 10px 6px; }
+  .ct-word-row  { padding: 10px 6px; }
+  .ct-wr-word   { font-size: 14px; }
+  .ct-wr-def    { font-size: 12px; }
 
-  /* always show action buttons — no hover on touch */
-  .ct-wr-acts { opacity: 1; }
+  /* always show action buttons — no hover on touchscreen */
+  .ct-wr-acts            { opacity: 1; }
   .ct-edit-btn, .ct-del-btn { width: 30px; height: 30px; font-size: 13px; }
 
-  .ct-tr-add-row { padding: 6px 10px; gap: 5px; }
-  .ct-add-cats   { gap: 3px; }
-  .ct-add-cat    { width: 28px; height: 28px; }
+  .ct-tr-add-row { padding: 6px 10px; }
 
   .ct-scan-row    { padding: 6px 10px 3px; flex-wrap: wrap; gap: 6px; }
-  .ct-scan-btn    { font-size: 12px; padding: 6px 10px; }
+  .ct-scan-btn    { font-size: 12px; }
   .ct-scan-status { padding: 2px 10px 4px; }
 
-  .ct-tr-footer { padding: 6px 10px 12px; gap: 5px; }
+  .ct-tr-footer { padding: 6px 10px 12px; }
   .ct-foot-btn  { font-size: 11px; padding: 7px 2px; }
 
-  /* ── Edit modal: compact centered ── */
-  .ct-edit-overlay { padding: 10px; }
+  /* ── Edit modal: stays as centered overlay (works fine) ── */
+  .ct-edit-overlay { padding: 10px; align-items: center; }
   .ct-edit-box {
     border-radius: 13px;
-    max-width: 100%;
-    width: 100%;
-    max-height: 92vh;
-    overflow-y: auto;
+    max-width: 100%; width: 100%;
+    max-height: 90vh; overflow-y: auto;
   }
-  .ct-edit-hdr  { padding: 12px 14px 10px; font-size: 14px; }
-  .ct-edit-body { padding: 10px 14px; gap: 10px; }
-  .ct-einput    { font-size: 14px; padding: 9px 11px; }
-  .ct-etextarea { font-size: 13px; padding: 9px 11px; min-height: 80px; }
-  .ct-ecat      { padding: 6px 11px; font-size: 12px; }
-  .ct-ck-row    { font-size: 13px; }
+  .ct-edit-hdr    { padding: 12px 14px 10px; font-size: 14px; }
+  .ct-edit-body   { padding: 10px 14px; gap: 10px; }
+  .ct-einput      { font-size: 14px; padding: 9px 11px; }
+  .ct-etextarea   { font-size: 13px; padding: 9px 11px; min-height: 80px; }
+  .ct-ecat        { padding: 6px 11px; font-size: 12px; }
+  .ct-ck-row      { font-size: 13px; }
   .ct-edit-footer { padding: 10px 14px 16px; }
   .ct-edit-footer .menu_button { font-size: 13px; padding: 9px; }
 

@@ -567,7 +567,10 @@ ${chatText}
     `);
 
     $('#ct_tr_close, #ct_tr_close2').on('click', ()=>$('#ct_tracker').removeClass('ct-open'));
-    $('#ct_tracker').on('click', function(e){ if(e.target===this) $(this).removeClass('ct-open'); });
+    // On desktop close by clicking backdrop; on mobile no backdrop exists so guard by target check
+    $('#ct_tracker').on('click', function(e){
+      if (e.target === this && window.innerWidth > 600) $(this).removeClass('ct-open');
+    });
 
     $('.ct-tr-tab').on('click', function(){
       trackerTab = this.dataset.tab;
