@@ -561,110 +561,67 @@
 
 
 @media (max-width: 600px) {
-  /* ── Tracker: bottom sheet on mobile ── */
-  .ct-tracker {
-    padding: 0;
-    align-items: flex-end;
-    justify-content: stretch;
-  }
+  /* ── Tracker: compact centered modal ── */
+  .ct-tracker { padding: 10px; align-items: center; }
+
   .ct-tracker-inner {
-    border-radius: 18px 18px 0 0;
-    max-width: 100%;
+    border-radius: 13px;
+    max-height: 94vh;
     width: 100%;
-    max-height: 92svh;
-    max-height: 92vh;
-    /* slide up animation */
-    animation: ctSlideUp 0.28s cubic-bezier(0.32, 0.72, 0, 1);
-  }
-  @keyframes ctSlideUp {
-    from { transform: translateY(100%); opacity: 0.5; }
-    to   { transform: none; opacity: 1; }
+    max-width: 100%;
+    animation: ctPop 0.22s cubic-bezier(0.34,1.56,0.64,1);
   }
 
-  /* drag handle */
-  .ct-tracker-inner::before {
-    content: '';
-    display: block;
-    width: 40px; height: 4px;
-    border-radius: 2px;
-    background: rgba(255,255,255,0.12);
-    margin: 10px auto 0;
-    flex-shrink: 0;
-  }
+  .ct-tr-header { padding: 12px 44px 8px 12px; }
+  .ct-tr-title  { font-size: 15px; }
+  .ct-tr-meta   { font-size: 11px; }
 
-  /* compact header */
-  .ct-tr-header {
-    padding: 10px 46px 8px 14px;
-  }
-  .ct-tr-title { font-size: 15px; }
+  .ct-tr-search-wrap { padding: 8px 10px 0; }
+  .ct-tr-search { font-size: 14px; padding: 9px 11px; }
 
-  /* larger tap targets on search */
-  .ct-tr-search { padding: 10px 12px; font-size: 14px; }
+  .ct-tr-tab { font-size: 13px; padding: 5px 12px 8px; }
 
-  /* bigger tabs */
-  .ct-tr-tab { font-size: 13px; padding: 6px 16px 9px; }
+  .ct-cat-bar { padding: 6px 10px; gap: 4px; }
 
-  /* word rows: bigger touch targets */
-  .ct-word-row { padding: 12px 8px; }
-  .ct-wr-word  { font-size: 15px; }
+  .ct-tr-body { padding: 2px 10px 6px; }
+  .ct-word-row { padding: 11px 6px; }
+  .ct-wr-word  { font-size: 14px; }
   .ct-wr-def   { font-size: 12px; }
 
-  /* always show action buttons on mobile (no hover) */
+  /* always show action buttons — no hover on touch */
   .ct-wr-acts { opacity: 1; }
   .ct-edit-btn, .ct-del-btn { width: 30px; height: 30px; font-size: 13px; }
 
-  /* add row: stack cats below */
-  .ct-tr-add-row { flex-wrap: wrap; gap: 6px; }
-  .ct-tr-add-input { min-width: 0; }
-  .ct-add-cats { order: 3; width: 100%; justify-content: flex-start; }
-  .ct-add-btn { order: 2; }
+  .ct-tr-add-row { padding: 6px 10px; gap: 5px; }
+  .ct-add-cats   { gap: 3px; }
+  .ct-add-cat    { width: 28px; height: 28px; }
 
-  /* scan row: wrap on narrow */
-  .ct-scan-row { flex-wrap: wrap; }
-  .ct-scan-label { font-size: 12px; }
-  .ct-scan-btn { flex: 1; min-width: 120px; }
+  .ct-scan-row    { padding: 6px 10px 3px; flex-wrap: wrap; gap: 6px; }
+  .ct-scan-btn    { font-size: 12px; padding: 6px 10px; }
+  .ct-scan-status { padding: 2px 10px 4px; }
 
-  /* footer: 2×2 grid */
-  .ct-tr-footer { flex-wrap: wrap; }
-  .ct-foot-btn { flex: 1; min-width: 80px; font-size: 11px; padding: 8px 4px; }
+  .ct-tr-footer { padding: 6px 10px 12px; gap: 5px; }
+  .ct-foot-btn  { font-size: 11px; padding: 7px 2px; }
 
-  /* toast: full width, above keyboard */
-  .ct-toast {
-    width: calc(100vw - 24px);
-    bottom: 20px; right: 12px; left: 12px;
-  }
-
-  /* ── Edit modal: full bottom sheet ── */
-  .ct-edit-overlay {
-    padding: 0;
-    align-items: flex-end;
-  }
+  /* ── Edit modal: compact centered ── */
+  .ct-edit-overlay { padding: 10px; }
   .ct-edit-box {
-    border-radius: 18px 18px 0 0;
+    border-radius: 13px;
     max-width: 100%;
     width: 100%;
-    max-height: 95svh;
-    max-height: 95vh;
+    max-height: 92vh;
     overflow-y: auto;
-    animation: ctSlideUp 0.25s cubic-bezier(0.32, 0.72, 0, 1);
   }
-  .ct-edit-box::before {
-    content: '';
-    display: block;
-    width: 40px; height: 4px;
-    border-radius: 2px;
-    background: rgba(255,255,255,0.12);
-    margin: 10px auto 2px;
-  }
-  .ct-edit-hdr { padding: 10px 16px 10px; }
-  .ct-edit-body { padding: 10px 16px; gap: 12px; }
+  .ct-edit-hdr  { padding: 12px 14px 10px; font-size: 14px; }
+  .ct-edit-body { padding: 10px 14px; gap: 10px; }
+  .ct-einput    { font-size: 14px; padding: 9px 11px; }
+  .ct-etextarea { font-size: 13px; padding: 9px 11px; min-height: 80px; }
+  .ct-ecat      { padding: 6px 11px; font-size: 12px; }
+  .ct-ck-row    { font-size: 13px; }
+  .ct-edit-footer { padding: 10px 14px 16px; }
+  .ct-edit-footer .menu_button { font-size: 13px; padding: 9px; }
 
-  /* bigger inputs in edit modal */
-  .ct-einput   { font-size: 15px; padding: 9px 12px; }
-  .ct-etextarea { font-size: 13px; padding: 9px 12px; min-height: 90px; }
-  .ct-ecat { padding: 6px 13px; font-size: 12px; }
-  .ct-ck-row { font-size: 13px; }
-  .ct-edit-footer { padding: 10px 16px 28px; } /* extra bottom for home bar */
-  .ct-edit-footer .menu_button { font-size: 13px; padding: 10px; }
+  /* ── Toast ── */
+  .ct-toast { width: calc(100vw - 24px); right: 12px; left: 12px; bottom: 16px; }
 }
 

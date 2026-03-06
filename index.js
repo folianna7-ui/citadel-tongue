@@ -569,37 +569,6 @@ ${chatText}
     $('#ct_tr_close, #ct_tr_close2').on('click', ()=>$('#ct_tracker').removeClass('ct-open'));
     $('#ct_tracker').on('click', function(e){ if(e.target===this) $(this).removeClass('ct-open'); });
 
-    // ── Swipe down to close (mobile) ──────────────────────────────────────────
-    (function addSwipeClose(overlayId, innerId) {
-      const overlay = document.getElementById(overlayId);
-      const inner   = document.getElementById(innerId);
-      if (!overlay || !inner) return;
-      let startY = 0, currentY = 0, dragging = false;
-      inner.addEventListener('touchstart', e => {
-        // Only start drag when touching near the top (handle / header area)
-        if (e.touches[0].clientY - inner.getBoundingClientRect().top > 60) return;
-        startY = e.touches[0].clientY; dragging = true;
-      }, { passive: true });
-      inner.addEventListener('touchmove', e => {
-        if (!dragging) return;
-        currentY = e.touches[0].clientY;
-        const dy = Math.max(0, currentY - startY);
-        inner.style.transform = `translateY(${dy}px)`;
-        inner.style.transition = 'none';
-      }, { passive: true });
-      inner.addEventListener('touchend', () => {
-        if (!dragging) return;
-        dragging = false;
-        const dy = currentY - startY;
-        inner.style.transition = '';
-        inner.style.transform  = '';
-        if (dy > 80) $(overlay).removeClass('ct-open');
-      });
-    })('ct_tracker', 'ct_tracker_inner_wrap');
-    // wrap inner for swipe target
-    const $inner = $('#ct_tracker .ct-tracker-inner');
-    $inner.attr('id', 'ct_tracker_inner_wrap');
-
     $('.ct-tr-tab').on('click', function(){
       trackerTab = this.dataset.tab;
       $('.ct-tr-tab').removeClass('active');
