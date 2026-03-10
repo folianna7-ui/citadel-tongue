@@ -1,990 +1,832 @@
 /**
- * Citadel Tongue v6
- *
- * KEY FIXES over v5:
- *  1. Injection type changed from IN_PROMPT/0 to IN_CHAT/1 depth=1
- *     (puts prompt right before the last message — maximum model weight)
- *  2. Added MESSAGE_SENT handler — prompt updates BEFORE the model generates
- *  3. charMatch() no longer silently blocks when name is unknown
- *  4. Prompt rewritten in English with contextual (not forced) guidance
- *  5. Few-shot example embedded in prompt
- *  6. Status indicator in the panel header
- *  7. Configurable injection position + depth in UI
- *  8. "Preview prompt" debug button
+ * Calendar Tracker v1.1 — SillyTavern Extension
+ * Timeline injection · Key Events · Deadlines · Calendar Rules · AI Scan
+ * Uses the active ST Connection Profile for AI generation
  */
 
 (() => {
   'use strict';
 
-  const MODULE_KEY = 'citadel_tongue';
-  const PROMPT_TAG = 'CT_LANGUAGE';
-
-  // ST injection types — same constants as FMT
-  const EXT_PROMPT_TYPES = Object.freeze({ IN_PROMPT: 0, IN_CHAT: 1, BEFORE_PROMPT: 2 });
-
-  // ─── Categories ───────────────────────────────────────────────────────────────
-
-  const CATEGORIES = Object.freeze({
-    presence: { label:'Presence', icon:'◈', color:'#a78bfa',
-      kw:['peace','quiet','presence','stillness','together','rest','dwell','warmth','beside','near','home','coexist','silence','still'] },
-    devotion: { label:'Devotion', icon:'♥', color:'#f472b6',
-      kw:['mine','bond','trust','devotion','cherish','precious','soul','love','protect','sacred','forever','claim','belong','oath','swear'] },
-    instinct: { label:'Instinct', icon:'⚔', color:'#fb923c',
-      kw:['blood','kill','hunt','threat','danger','territory','feral','primal','instinct','rage','cold','shield','body','weapon','fight','protect'] },
-    grief:    { label:'Grief',    icon:'◇', color:'#60a5fa',
-      kw:['loss','gone','absence','grief','empty','hollow','thousand','ache','mourn','sorrow','ghost','alone','years','left','remember','forget','past'] },
-    other:    { label:'Other',    icon:'◉', color:'#94a3b8', kw:[] },
-  });
-
-  const DEFAULT_RULES =
-`PHONETIC LAW OF THE CITADEL TONGUE:
-• Apostrophe (') = a breath-break — the moment emotion is too heavy to continue seamlessly. Not punctuation — a wound in the word.
-• HARSH ROOTS — KHAR', DHAL', VOR', RAETH' — territorial claim, violence, devotion that would drown the world in blood.
-• SOFT ROOTS — VAI', KAEL', VETH', SAEL', ETH' — intimacy, grief, love with no ceiling and no floor.
-• Compound words: two roots fused at the apostrophe exist between both meanings.
-• NEVER translate aloud. Meaning lives in context, body, the silence after.`;
-
-  const INITIAL_DICT = [
-    {id:1,  word:"Vai'enn",   cat:'presence', def:"Presence-without-purpose. The peace of two souls coexisting without demands. Gasil's word for Selena during her thousand-year absence — a ghost is still a presence.", chars:['Gasil'], pinned:false, auto:false, uses:0, lastUsed:0},
-    {id:2,  word:"Saith'en",  cat:'presence', def:"Peaceful coexistence without the threat of storm. Domesticity. A love so quiet the old world had no name for it. Sacred monotony.", chars:['Gasil'], pinned:false, auto:false, uses:0, lastUsed:0},
-    {id:3,  word:"Veth'ann",  cat:'devotion', def:"The Open One. A soul that has accepted the bond and cannot be sealed by another. Not possession — recognition. Carries: exposed, bleeding, unsheltered.", chars:['Gasil'], pinned:false, auto:false, uses:0, lastUsed:0},
-    {id:4,  word:"Kael'seth", cat:'devotion', def:"She whose mind is my shield. Trust not in safety — but in the clarity another brings to your chaos.", chars:['Gasil'], pinned:false, auto:false, uses:0, lastUsed:0},
-    {id:5,  word:"Thar'uen",  cat:'devotion', def:"To hold something so carefully it costs everything. The choice to cup water in open hands knowing it will drain.", chars:['Gasil'], pinned:false, auto:false, uses:0, lastUsed:0},
-    {id:6,  word:"Khar'dhal", cat:'instinct', def:"The possessive instinct to drown the world in blood to keep one soul safe. Not rage — something colder. Territorial devotion with no ceiling.", chars:['Gasil'], pinned:true,  auto:false, uses:0, lastUsed:0},
-    {id:7,  word:"Sael'inn",  cat:'instinct', def:"A child choosing shelter without words. The body approaching a specific scent before the mind decides. The choice is not made. It is performed.", chars:['Gasil'], pinned:false, auto:false, uses:0, lastUsed:0},
-    {id:8,  word:"Vai'tarr",  cat:'grief',    def:"Tenderness made of pain. Gentleness that exists because of what was lost, not despite it.", chars:['Gasil'], pinned:false, auto:false, uses:0, lastUsed:0},
-    {id:9,  word:"Vethmar",   cat:'grief',    def:"The shape a person leaves after they are gone. The warmth in empty sheets. Gasil lived inside Vethmar for a thousand years.", chars:['Gasil'], pinned:true,  auto:false, uses:0, lastUsed:0},
-    {id:10, word:"Saelorn",   cat:'grief',    def:"The ache of watching someone beautiful in a world that does not deserve them.", chars:['Gasil'], pinned:false, auto:false, uses:0, lastUsed:0},
-  ];
+  const MODULE_KEY = 'calendar_tracker';
 
   const defaultSettings = Object.freeze({
-    enabled:         true,
-    langName:        'Citadel Tongue',
-    chars:           ['Gasil'],
-    wordsPerScene:   6,
-    semantic:        true,
-    autoCapture:     true,
-    injectPhonetic:  true,
-    scanDepth:       5,
-    rules:           DEFAULT_RULES,
-    dict:            null,
-    nextId:          11,
-    apiEndpoint:     '',
-    apiKey:          '',
-    apiModel:        '',
-    fallbackToSt:    true,
-    // Injection position — IN_CHAT @ depth 1 is the money spot
-    injectionType:   EXT_PROMPT_TYPES.IN_CHAT,
-    injectionDepth:  1,
+    enabled:       true,
+    currentDate:   '',
+    keyEvents:     null,
+    deadlines:     null,
+    calendarRules: '',
+    autoScan:      false,
+    scanDepth:     20,
+    nextEventId:   1,
+    nextDeadlineId:1,
   });
 
-  let trackerCat    = 'all';
-  let trackerSearch = '';
-  let trackerTab    = 'words';
-  let _workingApi   = null;
+  let activeTab      = 'events';
+  let _lastAutoLen   = 0;
+  let _autoScanTimer = null;
 
-  // ─── Context ─────────────────────────────────────────────────────────────────
+  // ─── Context helpers ──────────────────────────────────────────────────────
 
   function ctx() { return SillyTavern.getContext(); }
 
   function getSettings() {
     const { extensionSettings } = ctx();
-    if (!extensionSettings[MODULE_KEY]) {
-      extensionSettings[MODULE_KEY] = {
-        ...structuredClone(defaultSettings),
-        dict:  structuredClone(INITIAL_DICT),
-        nextId: 11,
-        rules: DEFAULT_RULES,
-      };
-    }
+    if (!extensionSettings[MODULE_KEY])
+      extensionSettings[MODULE_KEY] = { ...structuredClone(defaultSettings), keyEvents: [], deadlines: [] };
     const s = extensionSettings[MODULE_KEY];
-    if (!Array.isArray(s.dict))   s.dict  = structuredClone(INITIAL_DICT);
-    if (!Array.isArray(s.chars))  s.chars = ['Gasil'];
-    if (!s.rules)                 s.rules = DEFAULT_RULES;
-    if (s.injectionType  === undefined) s.injectionType  = EXT_PROMPT_TYPES.IN_CHAT;
-    if (s.injectionDepth === undefined) s.injectionDepth = 1;
-    s.dict = s.dict.map(w => ({ uses:0, lastUsed:0, auto:false, pinned:false, chars:[], ...w }));
+    if (!Array.isArray(s.keyEvents))  s.keyEvents  = [];
+    if (!Array.isArray(s.deadlines))  s.deadlines  = [];
+    if (!s.nextEventId)    s.nextEventId    = (s.keyEvents.length  || 0) + 1;
+    if (!s.nextDeadlineId) s.nextDeadlineId = (s.deadlines.length  || 0) + 1;
     return s;
   }
 
-  // ─── AI generation ────────────────────────────────────────────────────────────
+  function save() { ctx().saveSettingsDebounced(); }
 
-  function getBaseUrl() {
-    return (getSettings().apiEndpoint || '').trim().replace(/\/+$/, '') || null;
+  // ─── Prompt injection ─────────────────────────────────────────────────────
+
+  function buildPromptText() {
+    const s = getSettings();
+    const lines = ['[TIMELINE: KEY EVENTS]'];
+    if (s.currentDate) lines.push(`CURRENT DATE: ${s.currentDate}`);
+    if (s.keyEvents.length) {
+      lines.push('KEY EVENTS:');
+      s.keyEvents.forEach(e => lines.push(`• ${e.date ? '[' + e.date + '] ' : ''}${e.text}`));
+    }
+    if (s.deadlines.length) {
+      lines.push('UPCOMING EVENTS:');
+      s.deadlines.forEach(e => lines.push(`• ${e.date ? '[' + e.date + '] ' : ''}${e.text}`));
+    }
+    if (s.calendarRules) {
+      lines.push('CALENDAR RULES:');
+      lines.push(s.calendarRules);
+    }
+    return lines.join('\n');
   }
 
+  async function updatePrompt() {
+    const s = getSettings();
+    const { setExtensionPrompt, extension_prompt_types } = ctx();
+    if (!setExtensionPrompt) return;
+    const hasContent = s.currentDate || s.keyEvents.length || s.deadlines.length || s.calendarRules;
+    if (!s.enabled || !hasContent) {
+      setExtensionPrompt(MODULE_KEY, '', extension_prompt_types?.IN_PROMPT ?? 0, 0);
+      return;
+    }
+    setExtensionPrompt(MODULE_KEY, buildPromptText(), extension_prompt_types?.IN_PROMPT ?? 0, 0);
+  }
+
+  // ─── AI generation — uses active ST Connection Profile ────────────────────
+
   function extractText(data) {
-    if (data.choices?.[0]?.message?.content !== undefined) return data.choices[0].message.content;
-    if (data.choices?.[0]?.text             !== undefined) return data.choices[0].text;
-    if (typeof data.response === 'string') return data.response;
-    if (typeof data.content  === 'string') return data.content;
-    if (typeof data.text     === 'string') return data.text;
-    if (data.message?.content !== undefined) return data.message.content;
+    if (data?.choices?.[0]?.message?.content !== undefined) return data.choices[0].message.content;
+    if (data?.choices?.[0]?.text             !== undefined) return data.choices[0].text;
+    if (typeof data?.response === 'string')  return data.response;
+    if (Array.isArray(data?.content)) {
+      const t = data.content.find(b => b.type === 'text');
+      return t?.text ?? null;
+    }
+    if (typeof data?.content === 'string') return data.content;
     return null;
   }
 
   async function aiGenerate(userPrompt, systemPrompt) {
-    const s    = getSettings();
-    const base = getBaseUrl();
-
-    if (base) {
-      const headers = {
-        'Content-Type': 'application/json',
-        ...((s.apiKey||'').trim() ? { Authorization:`Bearer ${s.apiKey.trim()}` } : {}),
-      };
-      if (_workingApi?.base === base) {
-        try {
-          const resp = await fetch(_workingApi.url, {
-            method:'POST', headers,
-            body: JSON.stringify(_workingApi.builder(s.apiModel||'gpt-4o-mini', userPrompt, systemPrompt)),
-          });
-          if (resp.ok) { const t = extractText(await resp.json()); if (t?.trim()) return t; }
-        } catch {}
-        _workingApi = null;
-      }
-      const endpoints = [
-        `${base}/v1/chat/completions`,`${base}/chat/completions`,
-        `${base}/v1/completions`,     `${base}/completions`,
-      ];
-      const builders = [
-        (m,u,sys) => ({ model:m, max_tokens:1200, temperature:0.7, messages:[{role:'system',content:sys},{role:'user',content:u}] }),
-        (m,u,sys) => ({ model:m, max_tokens:1200, temperature:0.7, messages:[{role:'user',content:`${sys}\n\n---\n\n${u}`}] }),
-        (m,u,sys) => ({ model:m, max_tokens:1200, temperature:0.7, prompt:`${sys}\n\n${u}` }),
-      ];
-      const model = s.apiModel || 'gpt-4o-mini';
-      for (const url of endpoints) {
-        for (const builder of builders) {
-          try {
-            const resp = await fetch(url, { method:'POST', headers, body:JSON.stringify(builder(model,userPrompt,systemPrompt)) });
-            if (!resp.ok) continue;
-            const t = extractText(await resp.json());
-            if (t?.trim()) { _workingApi={base,url,builder}; return t; }
-          } catch {}
-        }
-      }
-      if (s.fallbackToSt === false) throw new Error('Custom API unreachable');
-      console.warn('[CT] Custom API failed — falling back to ST');
-    }
-
     const c = ctx();
-    if (typeof c.generateRaw !== 'function')
-      throw new Error('generateRaw not available. Update ST or configure a custom API.');
-    const result = await c.generateRaw(userPrompt, null, false, true, systemPrompt, true);
-    if (!result?.trim()) throw new Error('Model returned empty response.');
-    return result;
-  }
+    const fullPrompt = `${systemPrompt}\n\n---\n\n${userPrompt}`;
 
-  // ─── Character check ──────────────────────────────────────────────────────────
-
-  // FIX: previously returned false when name was unknown → silently disabled everything
-  // Now: if chars list is empty → always active. If name unknown → give benefit of the doubt → active.
-  function charMatch() {
-    const s    = getSettings();
-    if (!s.chars.length) return true;           // no filter = always active
-    const name = (ctx().name2 || '').toLowerCase();
-    if (!name) return true;                     // no char loaded yet = don't block
-    return s.chars.some(c => name.includes(c.toLowerCase().trim()));
-  }
-
-  // ─── Semantic scoring ─────────────────────────────────────────────────────────
-
-  function recentText() {
-    const s = getSettings();
-    return (ctx().chat||[]).filter(m=>!m.is_system).slice(-s.scanDepth)
-      .map(m=>(m.mes||'').toLowerCase()).join(' ');
-  }
-
-  function scoreWord(w, txt) {
-    const cat = CATEGORIES[w.cat]||CATEGORIES.other;
-    const kwHits = (cat.kw||[]).filter(k=>txt.includes(k)).length;
-    // Also score on word itself appearing in context (character already using it)
-    const selfHit = txt.includes(w.word.toLowerCase()) ? 2 : 0;
-    const h = w.lastUsed ? (Date.now()-w.lastUsed)/3600000 : 999;
-    return kwHits + selfHit + Math.min(h/24, 3);
-  }
-
-  // ─── Word selection ───────────────────────────────────────────────────────────
-
-  function pickWords() {
-    const s    = getSettings();
-    const name = (ctx().name2||'').toLowerCase();
-    const elig = s.dict.filter(w =>
-      !w.chars.length || w.chars.some(c=>name.includes(c.toLowerCase()))
-    );
-    if (!elig.length) return [];
-
-    const n      = Math.min(s.wordsPerScene, elig.length);
-    const pinned = elig.filter(w=>w.pinned);
-    const pool   = elig.filter(w=>!w.pinned);
-    const slots  = Math.max(0, n-pinned.length);
-
-    let chosen;
-    if (s.semantic) {
-      const txt = recentText();
-      chosen = [
-        ...pinned,
-        ...pool.map(w=>({w,sc:scoreWord(w,txt)})).sort((a,b)=>b.sc-a.sc).slice(0,slots).map(x=>x.w),
-      ];
-    } else {
-      chosen = [...pinned, ...pool.sort((a,b)=>(a.lastUsed||0)-(b.lastUsed||0)).slice(0,slots)];
+    // 1. generateRaw — uses whatever profile is active in ST
+    if (typeof c.generateRaw === 'function') {
+      try {
+        const r = await c.generateRaw(fullPrompt, '', false, false, '', 'normal');
+        if (r?.trim()) return r;
+      } catch (e) { console.warn('[CalTracker] generateRaw failed:', e.message); }
     }
 
-    const now = Date.now();
-    chosen.forEach(w=>{ w.lastUsed=now; w.uses=(w.uses||0)+1; });
-    ctx().saveSettingsDebounced();
-    return chosen;
-  }
+    // 2. ST proxy endpoints as fallback
+    const stEndpoints = [
+      { url: '/api/backends/chat-completions/generate',
+        body: () => ({ messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: userPrompt }], stream: false }) },
+      { url: '/api/generate',
+        body: () => ({ prompt: fullPrompt, max_new_tokens: 1500, stream: false }) },
+      { url: '/generate',
+        body: () => ({ prompt: fullPrompt, max_new_tokens: 1500, stream: false }) },
+    ];
 
-  // ─── Prompt builder ───────────────────────────────────────────────────────────
-  //
-  // Philosophy: don't force word usage — describe emotional context, let the model
-  // decide if the moment calls for it. The semantic engine already pre-selects words
-  // that match the scene's register. The prompt just explains the system.
-
-  function buildPrompt() {
-    const s        = getSettings();
-    const words    = pickWords();
-    const charList = s.chars.length ? s.chars.join(', ') : 'the character';
-    const primary  = s.chars[0] || 'the character';
-
-    const catGroups = {};
-    words.forEach(w => { (catGroups[w.cat] = catGroups[w.cat]||[]).push(w); });
-
-    let p = `[LIVING LANGUAGE — ${s.langName.toUpperCase()}]\n`;
-    p += `${primary} has a private language. These words exist in their body before their mind — they surface when emotion outweighs translation.\n\n`;
-
-    if (s.injectPhonetic && s.rules) {
-      p += `${s.rules}\n\n`;
+    for (const ep of stEndpoints) {
+      try {
+        const resp = await fetch(ep.url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(ep.body()),
+        });
+        if (!resp.ok) continue;
+        const text = extractText(await resp.json());
+        if (text?.trim()) return text;
+      } catch { /**/ }
     }
 
-    if (words.length) {
-      // Group by emotional register to show the model the scene's emotional landscape
-      const txt = recentText();
+    throw new Error('Нет активного подключения. Выбери Connection Profile в ST и попробуй снова.');
+  }
 
-      // Score transparency: tell the model WHY these words were chosen
-      const topCategories = Object.entries(catGroups)
-        .sort((a,b)=>b[1].length-a[1].length)
-        .map(([k])=>CATEGORIES[k]?.label||k);
+  // ─── Chat / Lorebook context ──────────────────────────────────────────────
 
-      p += `[WORDS — ${words.length} selected for this scene's emotional register: ${topCategories.join(', ')}]\n`;
-      p += `These words were chosen because their emotional weight resonates with what is happening in this scene.\n`;
-      p += `If a word's meaning fits the moment naturally — let it surface in the prose. If it doesn't fit — ignore it.\n`;
-      p += `Never translate. Never explain. The meaning belongs to the silence around it.\n\n`;
+  function getChatContext(depth) {
+    const chat = ctx().chat || [];
+    return chat.slice(-depth)
+      .map(m => `[${m.is_user ? 'USER' : 'CHAR'}]: ${(m.mes || '').slice(0, 600)}`)
+      .join('\n\n');
+  }
 
-      words.forEach(w => {
-        const c = CATEGORIES[w.cat]||CATEGORIES.other;
-        const score = scoreWord(w, txt);
-        const resonance = score >= 4 ? ' ★' : score >= 2 ? ' ·' : '';
-        p += `  ${c.icon} ${w.word}${resonance} — ${w.def}\n`;
+  function getLorebook() {
+    try {
+      const c = ctx();
+      const wi = c.worldInfoData || c.worldInfo || {};
+      const entries = [];
+      Object.values(wi).forEach(book => {
+        const src = book?.entries || book;
+        if (src && typeof src === 'object')
+          Object.values(src).forEach(e => { if (e?.content) entries.push(String(e.content)); });
       });
+      return entries.join('\n\n');
+    } catch { return ''; }
+  }
 
-      // One concrete example of natural use vs forced use
-      if (words[0]) {
-        const ex = words[0];
-        p += `\n[HOW TO USE — example with "${ex.word}"]\n`;
-        p += `  Natural: He looked at her and said nothing. "${ex.word}," finally, like a door closing softly.\n`;
-        p += `  Wrong: He said "${ex.word}", which means ${ex.def.split('.')[0].toLowerCase()}.\n`;
+  // ─── Scan functions ───────────────────────────────────────────────────────
+
+  function parseEventList(text, startId) {
+    if (!text) return [];
+    let id = startId || Date.now();
+    const events = [];
+    const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+    for (const line of lines) {
+      if (/^(EXISTING|ALREADY|KEY EVENTS|UPCOMING|OUTPUT|FORMAT|RULES|STRICT|NOTE)/i.test(line)) continue;
+      const clean = line.replace(/^[-•*]\s*/, '');
+      const m = clean.match(/^\[([^\]]+)\]\s+(.+)$/);
+      if (m) {
+        events.push({ id: id++, date: m[1].trim(), text: m[2].trim() });
+      } else if (clean.length > 3 && !clean.startsWith('#')) {
+        events.push({ id: id++, date: '', text: clean });
       }
     }
-
-    p += `\n[NEW WORD CREATION — only when a concept truly has no existing equivalent]\n`;
-    p += `Apply the phonetic law. Then add at the very end of your response (hidden from narrative):\n`;
-    p += `<div style="display:none;">[CT_WORD: Word | Full definition and emotional weight | category | ${primary}]</div>\n`;
-    p += `Categories: presence, devotion, instinct, grief, other\n`;
-    p += `Maximum one new word per response. Only when necessary — do not forge words for words' sake.`;
-
-    return p;
+    return events;
   }
 
-  // ─── Injection ────────────────────────────────────────────────────────────────
-
-  async function updatePrompt() {
-    const { setExtensionPrompt } = ctx();
+  async function scanKeyEvents(depth) {
     const s = getSettings();
+    const chatCtx  = getChatContext(depth);
+    const loreCtx  = getLorebook();
+    const existing = s.keyEvents.map(e => `[${e.date || '?'}] ${e.text}`).join('\n');
 
-    if (!s.enabled || !charMatch()) {
-      setExtensionPrompt(PROMPT_TAG, '', EXT_PROMPT_TYPES.IN_CHAT, 0, true);
-      updateStatusIndicator(false);
-      return;
-    }
+    const sys = `You are a precise chronicle archivist for a roleplay story. Extract KEY EVENTS that have ALREADY HAPPENED.
 
-    const prompt = buildPrompt();
-    // FIX: use s.injectionType / s.injectionDepth (default IN_CHAT @ depth 1)
-    // This places the prompt right before the last message — where it has maximum weight
-    setExtensionPrompt(PROMPT_TAG, prompt, s.injectionType, s.injectionDepth, true);
-    updateStatusIndicator(true);
+OUTPUT FORMAT — one event per line, exactly like this:
+[DATE] Very brief description (max 8 words)
+
+STRICT RULES:
+- Only past/completed events
+- Use the story world's own calendar dates (not real dates)
+- Be extremely concise — this is a timeline reminder only
+- Preserve ALL existing events listed below, only ADD new ones or correct wrong dates
+- No headers, no markdown, no commentary — ONLY the event lines
+
+${existing ? `EXISTING EVENTS TO PRESERVE:\n${existing}` : 'No existing events yet.'}`;
+
+    const usr = `RECENT CHAT (last ${depth} messages):\n${chatCtx || '(empty)'}${loreCtx ? `\n\nLOREBOOK:\n${loreCtx.slice(0, 3000)}` : ''}\n\nList all key past events:`;
+    const result = await aiGenerate(usr, sys);
+    return parseEventList(result, s.nextEventId);
   }
 
-  function updateStatusIndicator(active) {
+  async function scanDeadlines(depth) {
     const s = getSettings();
-    const $badge = $('#ct_status_badge');
-    if (!$badge.length) return;
-    const name = ctx().name2 || '—';
-    if (active) {
-      $badge.css({ background:'rgba(52,211,153,0.12)', color:'#34d399', borderColor:'rgba(52,211,153,0.25)' })
-        .text(`◈ ${name}`);
-    } else {
-      $badge.css({ background:'rgba(100,116,139,0.1)', color:'#475569', borderColor:'rgba(100,116,139,0.15)' })
-        .text('✕ inactive');
-    }
+    const chatCtx  = getChatContext(depth);
+    const loreCtx  = getLorebook();
+    const existing = s.deadlines.map(e => `[${e.date || '?'}] ${e.text}`).join('\n');
+    const past     = s.keyEvents.map(e => `[${e.date || '?'}] ${e.text}`).join('\n');
+
+    const sys = `You are a precise timeline analyst for a roleplay story. Extract UPCOMING/FUTURE EVENTS — things planned, expected, or mentioned as yet-to-happen.
+
+OUTPUT FORMAT — one event per line, exactly like this:
+[DATE] Very brief description (max 8 words)
+
+STRICT RULES:
+- Only FUTURE events that haven't happened yet
+- Use the story world's own calendar dates
+- Be extremely concise
+- Preserve ALL existing deadlines below, only ADD new ones
+- Do NOT repeat events that already happened (see past events list)
+- No headers, no markdown — ONLY the event lines
+
+${existing ? `EXISTING DEADLINES TO PRESERVE:\n${existing}` : 'No existing deadlines yet.'}
+${past ? `ALREADY HAPPENED (do NOT include these):\n${past}` : ''}`;
+
+    const usr = `RECENT CHAT (last ${depth} messages):\n${chatCtx || '(empty)'}${loreCtx ? `\n\nLOREBOOK:\n${loreCtx.slice(0, 3000)}` : ''}\n\nList all upcoming/planned events:`;
+    const result = await aiGenerate(usr, sys);
+    return parseEventList(result, s.nextDeadlineId);
   }
 
-  // ─── Word marker parsing ──────────────────────────────────────────────────────
+  // ─── Toast ────────────────────────────────────────────────────────────────
 
-  function parseWordMarker(raw) {
-    const parts = raw.replace(/^\[CT_WORD:\s*/i,'').replace(/\]$/,'').split('|');
-    if (parts.length < 3) return null;
-    const word = parts[0].trim();
-    const def  = parts.slice(1, parts.length-2).join('|').trim() || parts[1].trim();
-    const cat  = parts[parts.length-2].trim().toLowerCase();
-    const chr  = parts[parts.length-1].trim();
-    if (!word||!def) return null;
-    return { word, def, cat, chr };
-  }
-
-  function captureFromMessage(text, forceCapture) {
-    const s = getSettings();
-    if (!forceCapture && (!s.autoCapture || !text)) return;
-    if (!text) return;
-
-    const combined = text + '\n' + text.replace(/<[^>]+>/g,' ');
-    const scanRe   = /\[CT_WORD:([\s\S]*?)\]/gi;
-    const rawMatches = [];
-    let m;
-    while ((m=scanRe.exec(combined))!==null) rawMatches.push('[CT_WORD:'+m[1]+']');
-    if (!rawMatches.length) return;
-
-    let any = false;
-    for (const raw of rawMatches) {
-      const parsed = parseWordMarker(raw);
-      if (!parsed) continue;
-      const { word, def, cat, chr } = parsed;
-      const vc = Object.keys(CATEGORIES).includes(cat)?cat:'other';
-      const existing = s.dict.find(w=>w.word.toLowerCase()===word.toLowerCase());
-      if (existing) {
-        if (existing.def!==def) {
-          existing.def=def; existing.cat=vc;
-          if (chr&&!existing.chars.includes(chr)) existing.chars.push(chr);
-          any=true; showToast(word,def,vc,true);
-        }
-      } else {
-        s.dict.push({id:s.nextId++,word,cat:vc,def,chars:chr?[chr]:[],pinned:false,auto:true,uses:0,lastUsed:0});
-        any=true; showToast(word,def,vc,false);
-      }
-    }
-    if (any) { ctx().saveSettingsDebounced(); renderDrawer(); updateWordCount(); }
-  }
-
-  function cleanMarkers(text) {
-    if (!text) return text;
-    return text
-      .replace(/<div[^>]*display\s*:\s*none[^>]*>[\s\S]*?<\/div>/gi,'')
-      .replace(/\[CT_WORD:[\s\S]*?\]/gi,'').trim();
-  }
-
-  // ─── AI Rule generation ───────────────────────────────────────────────────────
-
-  async function generateRules(btnId, areaId, statusId) {
-    const s    = getSettings();
-    const $btn = $('#'+(btnId||'ct_gen_rules_btn'));
-    const $area= $('#'+(areaId||'ct_rules_area'));
-    const $st  = $('#'+(statusId||'ct_rules_status'));
-
-    $btn.prop('disabled',true).text('⏳ Generating…');
-    $st.css('color','#7a8499').text('Contacting model…');
-
-    try {
-      const sample  = s.dict.slice(0,20).map(w=>`• ${w.word} [${w.cat}]: ${w.def}`).join('\n');
-      const result  = await aiGenerate(
-        `Existing rules:\n${s.rules||DEFAULT_RULES}\n\nExisting words:\n${sample}\n\nAnalyze patterns. Add 2-3 new phonetic rules that emerge logically from the existing words. Keep all old rules. Return the full updated rule text — concise, same style.`,
-        `You create phonetic laws for a fictional demonic language used in dark RP. Reply with rule text only — no preamble, no markdown.`
-      );
-      $area.val(result.trim()); s.rules=result.trim();
-      ctx().saveSettingsDebounced(); await updatePrompt();
-      $st.css('color','#34d399').text('✓ Rules updated');
-    } catch(e) {
-      $st.css('color','#f87171').text('✗ '+e.message);
-    } finally {
-      $btn.prop('disabled',false).text('✦ Generate from dictionary');
-    }
-  }
-
-  // ─── Manual scan ─────────────────────────────────────────────────────────────
-
-  async function manualScan() {
-    const s    = getSettings();
-    const $btn = $('#ct_scan_btn'), $st = $('#ct_scan_status');
-    const depth = Math.max(1,parseInt($('#ct_manual_scan_depth').val(),10)||20);
-
-    $btn.prop('disabled',true).text('⏳ Scanning…');
-    $st.css('color','#7a8499').text('Analyzing chat…');
-
-    try {
-      const chat  = ctx().chat||[];
-      const msgs  = chat.filter(m=>!m.is_system).slice(-depth);
-      if (!msgs.length) throw new Error('No messages to scan');
-
-      const chatText = msgs.map(m=>
-        `[${m.is_user?'User':'Char'}]: ${cleanMarkers((m.mes||'').replace(/<[^>]+>/g,' ')).slice(0,400)}`
-      ).join('\n');
-
-      const existing  = s.dict.map(w=>`${w.word} (${w.cat})`).join(', ');
-      const primary   = s.chars[0]||'the character';
-
-      const result = await aiGenerate(
-        `Phonetic rules:\n${s.rules||DEFAULT_RULES}\n\nExisting words (update only if meaning genuinely expanded):\n${existing||'none'}\n\nDialogue (last ${depth} messages):\n${chatText}\n\nOutput 1–4 markers. Format exactly:\n[CT_WORD: Word | Definition and emotional weight | category | ${primary}]\nCategories: presence, devotion, instinct, grief, other\nCreate words strictly following phonetic law.`,
-        `You are the keeper of the language "${s.langName}" for dark RP. Analyze dialogue and output [CT_WORD:...] markers only. No text, no explanations. Empty response if nothing to add.`
-      );
-
-      captureFromMessage(result, true);
-      const n = (result.match(/\[CT_WORD:/gi)||[]).length;
-      $st.css('color', n?'#34d399':'#7a8499').text(n?`✓ Processed: ${n}`:'Nothing new found');
-    } catch(e) {
-      $st.css('color','#f87171').text('✗ '+e.message);
-    } finally {
-      $btn.prop('disabled',false).text('🔍 Scan chat');
-    }
-  }
-
-  // ─── Toast ────────────────────────────────────────────────────────────────────
-
-  function showToast(word, def, cat, isUpdate) {
-    const c  = CATEGORIES[cat]||CATEGORIES.other;
-    const el = $(`
-      <div class="ct-toast">
-        <div class="ct-toast-row">
-          <span class="ct-toast-dot" style="background:${c.color}"></span>
-          <span class="ct-toast-word">${word}</span>
-          <span class="ct-toast-badge${isUpdate?' ct-toast-badge-upd':''}">${isUpdate?'updated':'forged'}</span>
+  let _toastTimer = null;
+  function toast(msg, color, undoFn) {
+    color = color || '#34d399';
+    clearTimeout(_toastTimer);
+    $('.calt-toast').remove();
+    const undoBtn = undoFn ? `<button class="calt-toast-undo">↩ Отменить</button>` : '';
+    $('body').append(`
+      <div class="calt-toast">
+        <div class="calt-toast-row">
+          <span class="calt-toast-dot" style="background:${color}"></span>
+          <span class="calt-toast-msg">${msg}</span>
+          ${undoBtn}
         </div>
-        <div class="ct-toast-def">${def.slice(0,90)}${def.length>90?'…':''}</div>
       </div>`);
-    $('body').append(el);
-    requestAnimationFrame(()=>requestAnimationFrame(()=>el.addClass('ct-in')));
-    setTimeout(()=>{ el.addClass('ct-out'); setTimeout(()=>el.remove(),300); }, 4500);
+    const $t = $('.calt-toast');
+    setTimeout(() => $t.addClass('calt-in'), 10);
+    if (undoFn) $t.find('.calt-toast-undo').on('click', () => { undoFn(); $t.remove(); });
+    _toastTimer = setTimeout(() => { $t.addClass('calt-out'); setTimeout(() => $t.remove(), 300); }, 4500);
   }
 
-  // ─── Tracker popup ────────────────────────────────────────────────────────────
+  // ─── Settings panel ───────────────────────────────────────────────────────
 
-  function ensureTracker() {
-    if ($('#ct_tracker').length) return;
-    $('body').append(`
-      <div id="ct_tracker" class="ct-tracker">
-        <div class="ct-tracker-inner">
-          <div class="ct-tr-header">
-            <div class="ct-tr-title-wrap">
-              <span class="ct-tr-glow"></span>
-              <span id="ct_tr_title" class="ct-tr-title">${getSettings().langName}</span>
-            </div>
-            <div id="ct_tr_meta" class="ct-tr-meta"></div>
-            <button id="ct_tr_close" class="ct-tr-close">✕</button>
-          </div>
-          <div class="ct-tr-search-wrap">
-            <input type="text" id="ct_tr_search" class="ct-tr-search" placeholder="Search word or definition…">
-          </div>
-          <div class="ct-tr-tabs">
-            <button class="ct-tr-tab active" data-tab="words">Words</button>
-            <button class="ct-tr-tab" data-tab="rules">Phonetics</button>
-          </div>
-          <div id="ct_cat_bar" class="ct-cat-bar"></div>
-          <div id="ct_drawer_body" class="ct-tr-body"></div>
-          <div id="ct_add_row" class="ct-tr-add-row">
-            <input type="text" id="ct_add_input" class="ct-tr-add-input" placeholder="New word…">
-            <div id="ct_add_cats" class="ct-add-cats">
-              ${Object.entries(CATEGORIES).map(([k,c])=>`<button class="ct-add-cat" data-cat="${k}" style="--cc:${c.color}" title="${c.label}">${c.icon}</button>`).join('')}
-            </div>
-            <button id="ct_add_btn" class="ct-add-btn">+ Add</button>
-          </div>
-          <div class="ct-scan-row">
-            <label class="ct-scan-label">Scan last</label>
-            <input type="number" id="ct_manual_scan_depth" class="ct-scan-depth-inp" min="1" max="100" value="20">
-            <span class="ct-scan-unit">messages</span>
-            <button class="menu_button ct-scan-btn" id="ct_scan_btn">🔍 Scan chat</button>
-          </div>
-          <div id="ct_scan_status" class="ct-scan-status"></div>
-          <div class="ct-tr-footer">
-            <button class="menu_button ct-foot-btn" id="ct_export_btn">⬇ Export</button>
-            <button class="menu_button ct-foot-btn" id="ct_import_btn">⬆ Import</button>
-            <button class="menu_button ct-foot-btn" id="ct_tr_close2">Close</button>
-          </div>
-        </div>
-      </div>
-
-      <div id="ct_edit_modal" class="ct-edit-overlay">
-        <div class="ct-edit-box">
-          <div class="ct-edit-hdr">
-            <span id="ct_edit_title">Edit word</span>
-            <button id="ct_edit_x">✕</button>
-          </div>
-          <div class="ct-edit-body">
-            <input type="hidden" id="ct_edit_id">
-            <label class="ct-elabel">Word</label>
-            <input type="text" id="ct_edit_word" class="ct-einput" placeholder="Vai'enn">
-            <label class="ct-elabel">Category</label>
-            <div id="ct_edit_cats" class="ct-ecats">
-              ${Object.entries(CATEGORIES).map(([k,c])=>`<button class="ct-ecat" data-cat="${k}" style="--cc:${c.color}">${c.icon} ${c.label}</button>`).join('')}
-            </div>
-            <label class="ct-elabel">Definition & emotional weight</label>
-            <textarea id="ct_edit_def" class="ct-etextarea" placeholder="Meaning, resonance, how the character uses this word…"></textarea>
-            <label class="ct-elabel">Characters <small>(comma-separated, empty = any)</small></label>
-            <input type="text" id="ct_edit_chars" class="ct-einput" placeholder="Gasil">
-            <label class="ct-ck-row"><input type="checkbox" id="ct_edit_pinned"> ⚓ Pin — always inject</label>
-          </div>
-          <div class="ct-edit-footer">
-            <button class="menu_button" id="ct_edit_cancel">Cancel</button>
-            <button class="menu_button ct-save-btn" id="ct_edit_save">Save</button>
-          </div>
-        </div>
-      </div>
-      <input type="file" id="ct_import_file" accept=".json" style="display:none">
-    `);
-
-    // Prompt preview modal
-    $('body').append(`
-      <div id="ct_preview_modal" class="ct-edit-overlay">
-        <div class="ct-edit-box" style="max-width:600px">
-          <div class="ct-edit-hdr">
-            <span>Current injected prompt</span>
-            <button id="ct_preview_x">✕</button>
-          </div>
-          <div class="ct-edit-body">
-            <pre id="ct_preview_text" style="font-size:11px;color:#5a6880;white-space:pre-wrap;word-break:break-word;max-height:60vh;overflow-y:auto;margin:0;font-family:inherit;line-height:1.6"></pre>
-          </div>
-        </div>
-      </div>
-    `);
-
-    $('#ct_tr_close,#ct_tr_close2').on('click',()=>$('#ct_tracker').removeClass('ct-open'));
-    $('#ct_tracker').on('click',function(e){if(e.target===this)$(this).removeClass('ct-open');});
-
-    $('.ct-tr-tab').on('click',function(){
-      trackerTab=this.dataset.tab;
-      $('.ct-tr-tab').removeClass('active'); $(this).addClass('active'); renderDrawer();
-    });
-
-    let db={};
-    $('#ct_tr_search').on('input',function(){
-      trackerSearch=this.value; clearTimeout(db.s); db.s=setTimeout(renderWordList,180);
-    });
-
-    let addCat='other';
-    $('#ct_add_cats .ct-add-cat').on('click',function(){
-      addCat=this.dataset.cat; $('#ct_add_cats .ct-add-cat').removeClass('active'); $(this).addClass('active');
-    });
-    $('#ct_add_btn').on('click',()=>{ const v=$('#ct_add_input').val().trim(); if(v){openEdit(null,v,addCat);$('#ct_add_input').val('');} });
-    $('#ct_add_input').on('keydown',e=>{if(e.key==='Enter'){const v=e.target.value.trim();if(v){openEdit(null,v,addCat);e.target.value='';}}} );
-
-    $('#ct_export_btn').on('click',exportDict);
-    $('#ct_import_btn').on('click',()=>$('#ct_import_file').click());
-    $('#ct_import_file').on('change',importDict);
-    $('#ct_scan_btn').on('click',manualScan);
-
-    $('#ct_edit_x,#ct_edit_cancel').on('click',closeEdit);
-    $('#ct_edit_modal').on('click',function(e){if(e.target===this)closeEdit();});
-    $('#ct_edit_save').on('click',saveEdit);
-    $('#ct_edit_cats').on('click','.ct-ecat',function(){
-      _editCat=this.dataset.cat; $('#ct_edit_cats .ct-ecat').removeClass('active'); $(this).addClass('active');
-    });
-    $('#ct_edit_word').on('keydown',e=>{if(e.key==='Enter')saveEdit();});
-    $('#ct_edit_def').on('keydown',e=>{if(e.key==='Enter'&&e.ctrlKey)saveEdit();});
-
-    $('#ct_preview_x').on('click',()=>$('#ct_preview_modal').removeClass('ct-eopen'));
-    $('#ct_preview_modal').on('click',function(e){if(e.target===this)$(this).removeClass('ct-eopen');});
-
-    $(document).on('keydown',e=>{
-      if(e.key==='Escape'){closeEdit();$('#ct_tracker').removeClass('ct-open');$('#ct_preview_modal').removeClass('ct-eopen');}
-    });
+  function getActiveProfileName() {
+    try {
+      const c = ctx();
+      return c.connectionManager?.selectedProfile?.name
+          || c.currentConnectionProfile?.name
+          || c.activeProfile?.name
+          || c.mainApi
+          || c.apiType
+          || null;
+    } catch { return null; }
   }
-
-  function renderDrawer() {
-    const s=getSettings();
-    $('#ct_tr_title').text(s.langName);
-    $('#ct_tr_meta').text(`${ctx().name2||s.chars[0]||'—'} · ${s.dict.length} words`);
-    if (trackerTab==='rules') {
-      $('#ct_cat_bar,#ct_add_row').hide();
-      $('#ct_drawer_body').html(`
-        <div class="ct-rules-wrap">
-          <textarea id="ct_tr_rules_area" class="ct-rules-edit" rows="12">${s.rules||DEFAULT_RULES}</textarea>
-          <div class="ct-rules-actions">
-            <button class="menu_button" id="ct_tr_rules_reset_btn" style="font-size:11px;padding:4px 8px">↩ Reset</button>
-            <button class="menu_button ct-gen-btn" id="ct_tr_gen_rules_btn">✦ Generate from dictionary</button>
-          </div>
-          <div id="ct_tr_rules_status" style="font-size:11px;min-height:15px;margin-top:4px"></div>
-        </div>
-      `);
-      let t;
-      $('#ct_tr_rules_area').on('input',function(){ clearTimeout(t); t=setTimeout(async()=>{ getSettings().rules=this.value; $('#ct_rules_area').val(this.value); ctx().saveSettingsDebounced(); await updatePrompt(); },600); });
-      $('#ct_tr_rules_reset_btn').on('click',async()=>{ const v=DEFAULT_RULES; $('#ct_tr_rules_area,#ct_rules_area').val(v); getSettings().rules=v; ctx().saveSettingsDebounced(); await updatePrompt(); });
-      $('#ct_tr_gen_rules_btn').on('click',()=>generateRules('ct_tr_gen_rules_btn','ct_tr_rules_area','ct_tr_rules_status'));
-      return;
-    }
-    $('#ct_cat_bar,#ct_add_row').show();
-    renderCatBar(); renderWordList();
-  }
-
-  function renderCatBar() {
-    const s=getSettings(), bc={};
-    s.dict.forEach(w=>{bc[w.cat]=(bc[w.cat]||0)+1;});
-    $('#ct_cat_bar').html(`
-      <button class="ct-cat-chip ${trackerCat==='all'?'active':''}" data-cat="all">All <span class="ct-n">${s.dict.length}</span></button>
-      ${Object.entries(CATEGORIES).map(([k,c])=>{
-        const n=bc[k]||0; if(!n)return'';
-        return `<button class="ct-cat-chip ${trackerCat===k?'active':''}" data-cat="${k}" style="--cc:${c.color}">${c.icon} ${c.label} <span class="ct-n">${n}</span></button>`;
-      }).join('')}
-    `);
-    $('#ct_cat_bar .ct-cat-chip').on('click',function(){trackerCat=this.dataset.cat;renderCatBar();renderWordList();});
-  }
-
-  function renderWordList() {
-    const s=getSettings();
-    let list = trackerCat==='all'?s.dict:s.dict.filter(w=>w.cat===trackerCat);
-    if (trackerSearch.trim()) { const q=trackerSearch.toLowerCase(); list=list.filter(w=>w.word.toLowerCase().includes(q)||w.def.toLowerCase().includes(q)); }
-    const body=$('#ct_drawer_body');
-    if (!list.length) { body.html(`<div class="ct-empty">No words yet. Click <b>+ Add</b> or let the model forge them ✦</div>`); return; }
-    body.html(list.map(w=>{
-      const c=CATEGORIES[w.cat]||CATEGORIES.other, chars=(w.chars||[]).join(', '), def=w.def.length>130?w.def.slice(0,127)+'…':w.def;
-      return `<div class="ct-word-row" data-id="${w.id}">
-        <span class="ct-wr-dot" style="background:${c.color}"></span>
-        <div class="ct-wr-body">
-          <div class="ct-wr-top">
-            <span class="ct-wr-word">${w.word}</span>
-            ${w.pinned?'<span class="ct-pin" title="Pinned">⚓</span>':''}
-            ${w.auto?'<span class="ct-auto">auto</span>':''}
-          </div>
-          <div class="ct-wr-def">${def}</div>
-          ${chars?`<div class="ct-wr-chars">◈ ${chars}</div>`:''}
-        </div>
-        <div class="ct-wr-acts">
-          <span class="ct-uses" title="Times injected">↻${w.uses||0}</span>
-          <button class="ct-edit-btn" data-id="${w.id}">✎</button>
-          <button class="ct-del-btn"  data-id="${w.id}">✕</button>
-        </div>
-      </div>`;
-    }).join(''));
-    body.find('.ct-edit-btn').on('click',function(e){e.stopPropagation();openEdit(+this.dataset.id);});
-    body.find('.ct-del-btn').on('click', function(e){e.stopPropagation();deleteWord(+this.dataset.id);});
-    body.find('.ct-word-row').on('click',function(){openEdit(+this.dataset.id);});
-  }
-
-  function deleteWord(id){
-    const s=getSettings(),w=s.dict.find(x=>x.id===id);
-    if(!w||!confirm(`Delete "${w.word}"?`))return;
-    s.dict=s.dict.filter(x=>x.id!==id); ctx().saveSettingsDebounced(); renderDrawer(); updateWordCount();
-  }
-
-  let _editCat='other';
-  function openEdit(id=null,prefill='',prefillCat='other'){
-    const s=getSettings(),ex=id?s.dict.find(w=>w.id===id):null;
-    _editCat=ex?ex.cat:prefillCat;
-    $('#ct_edit_title').text(ex?'Edit word':'New word');
-    $('#ct_edit_id').val(id||''); $('#ct_edit_word').val(ex?.word||prefill);
-    $('#ct_edit_def').val(ex?.def||''); $('#ct_edit_chars').val((ex?.chars||[]).join(', '));
-    $('#ct_edit_pinned').prop('checked',ex?.pinned||false);
-    $('#ct_edit_cats .ct-ecat').removeClass('active');
-    $(`#ct_edit_cats .ct-ecat[data-cat="${_editCat}"]`).addClass('active');
-    $('#ct_edit_modal').addClass('ct-eopen');
-    setTimeout(()=>document.getElementById('ct_edit_word')?.focus(),80);
-  }
-  function closeEdit(){ $('#ct_edit_modal').removeClass('ct-eopen'); }
-  function saveEdit(){
-    const s=getSettings(),word=$('#ct_edit_word').val().trim(),def=$('#ct_edit_def').val().trim();
-    const cat=$('#ct_edit_cats .ct-ecat.active').data('cat')||_editCat;
-    const chars=$('#ct_edit_chars').val().split(',').map(c=>c.trim()).filter(Boolean);
-    const pinned=$('#ct_edit_pinned').is(':checked'),id=$('#ct_edit_id').val();
-    if(!word){document.getElementById('ct_edit_word')?.focus();return;}
-    if(!def){document.getElementById('ct_edit_def')?.focus();return;}
-    if(id){const t=s.dict.find(w=>w.id===+id);if(t)Object.assign(t,{word,cat,def,chars,pinned});}
-    else{s.dict.push({id:s.nextId++,word,cat,def,chars,pinned,auto:false,uses:0,lastUsed:0});}
-    ctx().saveSettingsDebounced(); renderDrawer(); updateWordCount(); closeEdit();
-  }
-
-  function exportDict(){
-    const s=getSettings(),a=document.createElement('a');
-    a.href='data:application/json;charset=utf-8,'+encodeURIComponent(JSON.stringify({langName:s.langName,rules:s.rules,dict:s.dict},null,2));
-    a.download=`${s.langName.replace(/\s+/g,'_')}_dict.json`; a.click();
-  }
-  function importDict(e){
-    const file=e.target.files[0]; if(!file)return;
-    const r=new FileReader();
-    r.onload=ev=>{ try{
-      const data=JSON.parse(ev.target.result),s=getSettings();
-      if(data.langName)s.langName=data.langName; if(data.rules)s.rules=data.rules;
-      if(Array.isArray(data.dict)) data.dict.forEach(w=>{if(!s.dict.find(x=>x.word.toLowerCase()===w.word.toLowerCase()))s.dict.push({...w,id:s.nextId++,auto:false});});
-      ctx().saveSettingsDebounced(); renderDrawer(); updateWordCount();
-    }catch(err){alert('Import error: '+err.message);}};
-    r.readAsText(file); e.target.value='';
-  }
-
-  function updateWordCount(){ $('#ct_words_total').text(`/ ${getSettings().dict.length}`); }
-
-  // ─── Settings panel ───────────────────────────────────────────────────────────
 
   function mountSettingsUi() {
-    if ($('#ct_settings_block').length) return;
-    const target = $('#extensions_settings2').length?'#extensions_settings2':'#extensions_settings';
-    if (!$(target).length){ console.warn('[CT] settings container not found'); return; }
+    if ($('#calt_block').length) return;
+
+    const profileName = getActiveProfileName();
+    const connLabel   = profileName || 'Активный профиль ST';
+    const connColor   = profileName ? '#34d399' : '#fbbf24';
+
+    const $ext = $('#extensions_settings2, #extensions_settings').first();
+    if (!$ext.length) return;
+
+    $ext.append(`
+      <div class="calt-block" id="calt_block">
+        <div class="calt-hdr" id="calt_hdr">
+          <span class="calt-gem">🗓</span>
+          <span class="calt-title">Calendar Tracker</span>
+          <span class="calt-badge" id="calt_badge" style="display:none">0</span>
+          <span class="calt-chev" id="calt_chev">▾</span>
+        </div>
+        <div class="calt-body" id="calt_body">
+          <div class="calt-meta" id="calt_meta">нет данных</div>
+
+          <label class="calt-ck" style="margin-top:8px;display:flex;align-items:center;gap:6px;cursor:pointer;font-size:12px;color:#94a3b8">
+            <input type="checkbox" id="calt_enabled" style="accent-color:#fbbf24">
+            <span>Включено (инжект в промпт)</span>
+          </label>
+
+          <label class="calt-ck" style="margin-top:5px;display:flex;align-items:center;gap:6px;cursor:pointer;font-size:12px;color:#94a3b8">
+            <input type="checkbox" id="calt_autoscan" style="accent-color:#fbbf24">
+            <span>Авто-сканирование</span>
+          </label>
+
+          <div class="calt-field-row">
+            <span class="calt-flabel">Текущая дата</span>
+            <input class="calt-text-input" id="calt_current_date" placeholder="напр. 5 Jan 301 O.F.">
+          </div>
+
+          <button class="menu_button calt-open-btn" id="calt_open_btn">📖 Открыть календарь</button>
+
+          <div class="calt-sec">
+            <div class="calt-sec-hdr" id="calt_conn_hdr">
+              <span class="calt-sec-chev" id="calt_conn_chev">▸</span>
+              <span>🔌 Подключение</span>
+            </div>
+            <div class="calt-sec-body" id="calt_conn_body" style="display:none">
+              <div class="calt-conn-status">
+                <span class="calt-conn-dot" id="calt_conn_dot" style="color:${connColor}">●</span>
+                <span class="calt-conn-label" id="calt_conn_label">${connLabel}</span>
+              </div>
+              <p class="calt-conn-hint">Расширение использует активный Connection Profile из ST. Ничего настраивать не нужно.</p>
+              <button class="menu_button calt-test-btn" id="calt_test_btn">⚡ Тест подключения</button>
+              <div class="calt-api-status" id="calt_test_status"></div>
+            </div>
+          </div>
+        </div>
+      </div>`);
 
     const s = getSettings();
-    const sec=(id,icon,title,content)=>`
-      <div class="ct-sec" id="ct_sec_${id}">
-        <div class="ct-sec-hdr" data-sec="${id}"><span class="ct-sec-chev">▸</span><span>${icon} ${title}</span></div>
-        <div class="ct-sec-body" style="display:none">${content}</div>
-      </div>`;
+    $('#calt_enabled').prop('checked', s.enabled !== false);
+    $('#calt_autoscan').prop('checked', !!s.autoScan);
+    $('#calt_current_date').val(s.currentDate || '');
+    updateBadge();
+    updateMeta();
 
-    const secMain=`
-      <div class="ct-2col">
-        <label class="ct-ck"><input type="checkbox" id="ct_enabled" ${s.enabled?'checked':''}><span>Inject into prompt</span></label>
-        <label class="ct-ck"><input type="checkbox" id="ct_phonetic" ${s.injectPhonetic?'checked':''}><span>Inject phonetic rules</span></label>
-      </div>
-      <div class="ct-field-row" style="margin-top:8px">
-        <label class="ct-flabel">Language name</label>
-        <input type="text" id="ct_lang_name" class="ct-text-input" value="${s.langName}">
-      </div>
-      <div class="ct-2col" style="margin-top:8px;gap:6px">
-        <button class="menu_button" id="ct_open_tracker_btn" style="flex:1">◈ Open dictionary</button>
-        <button class="menu_button" id="ct_preview_btn" style="flex:1;font-size:11px">👁 Preview prompt</button>
-      </div>`;
-
-    const secChars=`
-      <div class="ct-hint">Language activates only for these characters. Empty = always active.</div>
-      <div id="ct_char_tags" class="ct-char-tags"></div>
-      <div class="ct-2col ct-gap">
-        <input type="text" id="ct_char_add_inp" class="ct-text-input" placeholder="Character name…" style="flex:1">
-        <button class="menu_button" id="ct_char_add_btn" style="flex-shrink:0">+ Add</button>
-      </div>`;
-
-    const secScan=`
-      <div class="ct-2col">
-        <label class="ct-ck"><input type="checkbox" id="ct_autocapture" ${s.autoCapture?'checked':''}><span>Auto-capture new words</span></label>
-        <label class="ct-ck"><input type="checkbox" id="ct_semantic" ${s.semantic?'checked':''}><span>Semantic word selection</span></label>
-      </div>
-      <div class="ct-hint" style="margin-top:6px">Semantic mode picks words whose emotional register matches the current scene.</div>
-      <div class="ct-srow ct-slider-row">
-        <label>Scan depth</label>
-        <input type="range" id="ct_scan_depth" min="1" max="20" value="${s.scanDepth}">
-        <span id="ct_scan_depth_val">${s.scanDepth}</span><span class="ct-unit">msg</span>
-      </div>
-      <div class="ct-srow ct-slider-row">
-        <label>Words per scene</label>
-        <input type="range" id="ct_words_per" min="2" max="15" value="${s.wordsPerScene}">
-        <span id="ct_words_per_val">${s.wordsPerScene}</span>
-        <span class="ct-unit" id="ct_words_total">/ ${s.dict.length}</span>
-      </div>`;
-
-    const typeLabel = { 0:'Before System Prompt', 1:'In Chat (recommended)', 2:'Author\'s Note position' };
-    const secInject=`
-      <div class="ct-hint">Controls where in the prompt the language block appears. <b>In Chat @ depth 1</b> puts it right before the last message — maximum model attention.</div>
-      <div class="ct-field-row" style="margin-top:6px">
-        <label class="ct-flabel">Position</label>
-        <select id="ct_inject_type" class="ct-text-input" style="padding:4px 8px">
-          <option value="0" ${s.injectionType===0?'selected':''}>Before System Prompt</option>
-          <option value="1" ${s.injectionType===1?'selected':''}>In Chat (recommended)</option>
-          <option value="2" ${s.injectionType===2?'selected':''}>Author's Note position</option>
-        </select>
-      </div>
-      <div class="ct-srow ct-slider-row" id="ct_depth_row" ${s.injectionType===0?'style="opacity:.4;pointer-events:none"':''}>
-        <label>Depth</label>
-        <input type="range" id="ct_inject_depth" min="0" max="15" value="${s.injectionDepth}">
-        <span id="ct_inject_depth_val">${s.injectionDepth}</span>
-        <span class="ct-unit">from end</span>
-      </div>
-      <div class="ct-hint" style="margin-top:6px" id="ct_inject_hint">${typeLabel[s.injectionType]||''}</div>`;
-
-    const secRules=`
-      <div class="ct-hint">Rules are injected with each prompt as the phonetic law of the language. Edit manually or generate from the dictionary.</div>
-      <textarea id="ct_rules_area" class="ct-rules-edit" rows="7">${s.rules||DEFAULT_RULES}</textarea>
-      <div class="ct-rules-actions">
-        <button class="menu_button" id="ct_rules_reset_btn" style="font-size:11px;padding:4px 8px">↩ Reset</button>
-        <button class="menu_button ct-gen-btn" id="ct_gen_rules_btn">✦ Generate from dictionary</button>
-      </div>
-      <div id="ct_rules_status" style="font-size:11px;min-height:15px;margin-top:4px"></div>`;
-
-    const hasCustom=!!(s.apiEndpoint||'').trim();
-    const secApi=`
-      <div class="ct-api-mode-bar">
-        <div class="ct-api-mode-label">Generation source:</div>
-        <div class="ct-api-btns">
-          <button class="ct-api-btn ${!hasCustom?'active':''}" data-mode="st">🟢 ST (current)</button>
-          <button class="ct-api-btn ${hasCustom?'active':''}" data-mode="custom">🔌 Custom API</button>
-        </div>
-      </div>
-      <div id="ct_mode_st" ${hasCustom?'style="display:none"':''}>
-        <div class="ct-api-info">✅ Citadel Tongue uses the model currently connected in SillyTavern.<br>No additional setup needed — works out of the box.</div>
-      </div>
-      <div id="ct_mode_custom" ${!hasCustom?'style="display:none"':''}>
-        <div class="ct-hint">Separate API for rule generation and manual scan.</div>
-        <label class="ct-ck ct-gap"><input type="checkbox" id="ct_fallback_st" ${s.fallbackToSt!==false?'checked':''}><span>Fallback to ST if unavailable</span></label>
-        <input type="text" id="ct_api_endpoint" class="ct-text-input ct-gap" placeholder="https://api.openai.com or http://localhost:1234" value="${s.apiEndpoint||''}">
-        <div class="ct-2col ct-gap" style="gap:5px">
-          <input type="password" id="ct_api_key" class="ct-text-input" placeholder="API Key (optional)" value="${s.apiKey||''}" style="flex:1;margin:0">
-          <button class="menu_button" id="ct_api_key_eye" style="padding:4px 8px;flex-shrink:0">👁</button>
-        </div>
-        <input type="text" id="ct_api_model" class="ct-text-input ct-gap" placeholder="Model: gpt-4o-mini, llama3, etc." value="${s.apiModel||''}">
-        <button class="menu_button ct-gap" id="ct_api_test_btn" style="width:100%;font-size:11px;padding:5px 8px">🔌 Test connection</button>
-        <div id="ct_api_status" style="font-size:10px;min-height:14px;margin-top:4px"></div>
-      </div>`;
-
-    $(target).append(`
-      <div id="ct_settings_block" class="ct-main-block">
-        <div class="ct-main-hdr" id="ct_main_hdr">
-          <span class="ct-main-gem">◈</span>
-          <span class="ct-main-title" id="ct_main_title">${s.langName}</span>
-          <span id="ct_status_badge" class="ct-status-badge">✕ inactive</span>
-          <span class="ct-main-chev" id="ct_main_chev">▸</span>
-        </div>
-        <div class="ct-main-body" id="ct_main_body" style="display:none">
-          ${sec('main',   '⚙',  'Basic',           secMain)}
-          ${sec('chars',  '♥',  'Characters',      secChars)}
-          ${sec('scan',   '✦',  'Scan',            secScan)}
-          ${sec('inject', '◈',  'Injection',       secInject)}
-          ${sec('rules',  '◇',  'Language rules',  secRules)}
-          ${sec('api',    '🔌', 'API',             secApi)}
-        </div>
-      </div>
-    `);
-
-    // Toggles
-    $('#ct_main_hdr').on('click',function(){
-      const body=$('#ct_main_body'),chev=$('#ct_main_chev');
-      body.slideToggle(180); chev.text(body.is(':visible')?'▾':'▸');
+    // Header toggle
+    $('#calt_hdr').on('click', () => {
+      const $b = $('#calt_body');
+      $b.slideToggle(180);
+      $('#calt_chev').text($b.is(':visible') ? '▾' : '▸');
     });
-    $('.ct-sec-hdr').on('click',function(){
-      const body=$(this).next('.ct-sec-body'),chev=$(this).find('.ct-sec-chev');
-      body.slideToggle(150); chev.text(body.is(':visible')?'▾':'▸');
+
+    // Connection section toggle
+    $('#calt_conn_hdr').on('click', () => {
+      const $b = $('#calt_conn_body');
+      $b.slideToggle(150);
+      $('#calt_conn_chev').text($b.is(':visible') ? '▾' : '▸');
+      const name = getActiveProfileName();
+      $('#calt_conn_label').text(name || 'Активный профиль ST');
+      $('#calt_conn_dot').css('color', name ? '#34d399' : '#fbbf24');
     });
 
     // Controls
-    $('#ct_enabled').on('change', async function(){ getSettings().enabled=this.checked; ctx().saveSettingsDebounced(); await updatePrompt(); });
-    $('#ct_phonetic').on('change', async function(){ getSettings().injectPhonetic=this.checked; ctx().saveSettingsDebounced(); await updatePrompt(); });
-    $('#ct_autocapture').on('change', function(){ getSettings().autoCapture=this.checked; ctx().saveSettingsDebounced(); });
-    $('#ct_semantic').on('change', function(){ getSettings().semantic=this.checked; ctx().saveSettingsDebounced(); });
-
-    let db={};
-    const deb=(k,fn,t=350)=>{clearTimeout(db[k]);db[k]=setTimeout(fn,t);};
-
-    $('#ct_lang_name').on('input',function(){ deb('ln',async()=>{ const v=this.value.trim()||'Citadel Tongue'; getSettings().langName=v; ctx().saveSettingsDebounced(); $('#ct_main_title,#ct_tr_title').text(v); await updatePrompt(); }); });
-    $('#ct_scan_depth').on('input',function(){ getSettings().scanDepth=+this.value; $('#ct_scan_depth_val').text(this.value); ctx().saveSettingsDebounced(); });
-    $('#ct_words_per').on('input',function(){ getSettings().wordsPerScene=+this.value; $('#ct_words_per_val').text(this.value); ctx().saveSettingsDebounced(); });
-
-    // Injection position
-    const typeHints={ '0':'Least effective — far from the end of context', '1':'★ Recommended — right before the last message', '2':'Same as Author\'s Note' };
-    $('#ct_inject_type').on('change',async function(){
-      const t=+this.value; getSettings().injectionType=t; ctx().saveSettingsDebounced();
-      $('#ct_depth_row').css({opacity:t===0?.4:1, pointerEvents:t===0?'none':'auto'});
-      $('#ct_inject_hint').text(typeHints[t]||'');
-      await updatePrompt();
+    $('#calt_enabled').on('change', function () {
+      getSettings().enabled = this.checked; save(); updatePrompt();
     });
-    $('#ct_inject_depth').on('input',async function(){
-      getSettings().injectionDepth=+this.value; $('#ct_inject_depth_val').text(this.value); ctx().saveSettingsDebounced(); await updatePrompt();
+    $('#calt_autoscan').on('change', function () {
+      getSettings().autoScan = this.checked; save();
     });
 
-    // Rules
-    let rt;
-    $('#ct_rules_area').on('input',function(){ clearTimeout(rt); rt=setTimeout(async()=>{ getSettings().rules=this.value; ctx().saveSettingsDebounced(); await updatePrompt(); },600); });
-    $('#ct_rules_reset_btn').on('click',async()=>{ $('#ct_rules_area').val(DEFAULT_RULES); getSettings().rules=DEFAULT_RULES; ctx().saveSettingsDebounced(); await updatePrompt(); });
-    $('#ct_gen_rules_btn').on('click',()=>generateRules());
+    let _db = {};
+    const deb = (k, fn) => { clearTimeout(_db[k]); _db[k] = setTimeout(fn, 420); };
 
-    renderCharTags();
-    $('#ct_char_add_btn').on('click',addChar);
-    $('#ct_char_add_inp').on('keydown',e=>{if(e.key==='Enter')addChar();});
-
-    $('#ct_open_tracker_btn').on('click',()=>{ $('#ct_tracker').addClass('ct-open'); renderDrawer(); });
-
-    // Preview prompt
-    $('#ct_preview_btn').on('click',()=>{
-      const p=buildPrompt();
-      $('#ct_preview_text').text(p||'[Prompt is empty — language may be inactive for current character]');
-      $('#ct_preview_modal').addClass('ct-eopen');
+    $('#calt_current_date').on('input', function () {
+      const val = this.value;
+      deb('cd', async () => {
+        getSettings().currentDate = val.trim();
+        $('#calt_modal_date').val(val.trim());
+        save(); updateMeta(); await updatePrompt();
+      });
     });
 
-    // API
-    $('.ct-api-btn').on('click',function(){
-      const mode=this.dataset.mode; $('.ct-api-btn').removeClass('active'); $(this).addClass('active');
-      if(mode==='st'){ $('#ct_mode_st').show(); $('#ct_mode_custom').hide(); getSettings().apiEndpoint=''; $('#ct_api_endpoint').val(''); ctx().saveSettingsDebounced(); _workingApi=null; }
-      else{ $('#ct_mode_st').hide(); $('#ct_mode_custom').show(); }
+    $('#calt_test_btn').on('click', async () => {
+      const $s = $('#calt_test_status');
+      $s.css('color', '#7a8499').text('Тестирую…');
+      try {
+        const res = await aiGenerate('Reply with exactly one word: OK', 'You are a test. Reply with exactly one word: OK');
+        $s.css('color', '#34d399').text('✅ ' + res.trim().slice(0, 50));
+      } catch (e) {
+        $s.css('color', '#f87171').text('✗ ' + e.message);
+      }
     });
-    $('#ct_api_endpoint').on('input',function(){ deb('ep',()=>{ getSettings().apiEndpoint=this.value.trim(); ctx().saveSettingsDebounced(); _workingApi=null; }); });
-    $('#ct_api_key').on('input',function(){ deb('ak',()=>{ getSettings().apiKey=this.value; ctx().saveSettingsDebounced(); }); });
-    $('#ct_api_model').on('input',function(){ deb('am',()=>{ getSettings().apiModel=this.value.trim(); ctx().saveSettingsDebounced(); _workingApi=null; }); });
-    $('#ct_fallback_st').on('change',function(){ getSettings().fallbackToSt=this.checked; ctx().saveSettingsDebounced(); });
-    $('#ct_api_key_eye').on('click',function(){ const f=$('#ct_api_key'); f.attr('type',f.attr('type')==='password'?'text':'password'); });
-    $('#ct_api_test_btn').on('click',async()=>{
-      const $st=$('#ct_api_status'); $st.css('color','#7a8499').text('Testing…');
-      try{ const r=await aiGenerate('Say only: OK','Reply with exactly one word: OK'); $st.css('color','#34d399').text(`✅ Works: "${r.trim().slice(0,40)}"`); }
-      catch(e){ $st.css('color','#f87171').text('✗ '+e.message); }
-    });
+
+    $('#calt_open_btn').on('click', openModal);
   }
 
-  function renderCharTags(){
-    const s=getSettings(),el=$('#ct_char_tags'); el.empty();
-    (s.chars||[]).forEach(c=>{ el.append(`<span class="ct-char-tag">${c}<button class="ct-tag-x" data-c="${c}">✕</button></span>`); });
-    el.find('.ct-tag-x').on('click',function(){
-      const s=getSettings(); s.chars=s.chars.filter(x=>x!==this.dataset.c);
-      ctx().saveSettingsDebounced(); renderCharTags(); updatePrompt();
-    });
-  }
-  function addChar(){
-    const v=$('#ct_char_add_inp').val().trim(); if(!v)return;
-    const s=getSettings();
-    if(!s.chars.includes(v)){ s.chars.push(v); ctx().saveSettingsDebounced(); renderCharTags(); updatePrompt(); }
-    $('#ct_char_add_inp').val('');
+  function updateBadge() {
+    const s = getSettings();
+    const n = s.keyEvents.length + s.deadlines.length;
+    const $b = $('#calt_badge');
+    $b.text(n);
+    if (n > 0) $b.show(); else $b.hide();
   }
 
-  // ─── Events ───────────────────────────────────────────────────────────────────
+  function updateMeta() {
+    const s = getSettings();
+    const parts = [];
+    if (s.keyEvents.length)  parts.push(s.keyEvents.length + ' событий');
+    if (s.deadlines.length)  parts.push(s.deadlines.length + ' дедлайнов');
+    if (s.currentDate)       parts.push(s.currentDate);
+    $('#calt_meta').text(parts.join(' · ') || 'нет данных');
+    updateBadge();
+  }
 
-  const _cleanedMsgs = new Set();
+  // ─── Modal ────────────────────────────────────────────────────────────────
 
-  function processChatMessage(idx){
-    const msg=(ctx().chat||[])[idx];
-    if(!msg||msg.is_user)return;
-    captureFromMessage(msg.mes||'');
-    if(msg.mes&&/\[CT_WORD:/i.test(msg.mes)){
-      if(!_cleanedMsgs.has(idx)){ _cleanedMsgs.add(idx); msg.mes=cleanMarkers(msg.mes); }
-      const el=document.querySelector(`[mesid="${idx}"] .mes_text`);
-      if(el) el.innerHTML=cleanMarkers(el.innerHTML);
+  function openModal() {
+    if ($('#calt_modal').length) {
+      $('#calt_modal').addClass('calt-mopen');
+      renderTabContent();
+      return;
     }
+
+    $('body').append(`
+      <div class="calt-modal" id="calt_modal">
+        <div class="calt-modal-inner">
+          <div class="calt-drag-handle"></div>
+          <div class="calt-modal-hdr">
+            <span class="calt-modal-icon">🗓</span>
+            <span class="calt-modal-title">Calendar Tracker</span>
+            <div class="calt-modal-date-wrap">
+              <span class="calt-modal-date-label">Текущая дата:</span>
+              <input class="calt-modal-date-inp" id="calt_modal_date" placeholder="напр. 5 Jan 301 O.F.">
+            </div>
+            <button class="calt-modal-x" id="calt_modal_close">✕</button>
+          </div>
+          <div class="calt-tabs" id="calt_tabs">
+            <button class="calt-tab active" data-tab="events">⚔ Key Events</button>
+            <button class="calt-tab" data-tab="deadlines">⏳ Deadlines</button>
+            <button class="calt-tab" data-tab="rules">📜 Правила</button>
+          </div>
+          <div class="calt-tab-body" id="calt_tab_body"></div>
+          <div class="calt-modal-footer">
+            <button class="menu_button calt-foot-btn" id="calt_export_btn">💾 Экспорт</button>
+            <button class="menu_button calt-foot-btn" id="calt_import_btn">📥 Импорт</button>
+            <button class="menu_button calt-foot-btn calt-foot-close" id="calt_modal_close2">Закрыть</button>
+          </div>
+        </div>
+      </div>`);
+
+    $('#calt_modal_date').val(getSettings().currentDate || '');
+    $('#calt_modal').addClass('calt-mopen');
+
+    $('#calt_modal_close, #calt_modal_close2').on('click', () => $('#calt_modal').removeClass('calt-mopen'));
+    $('#calt_modal').on('click', function (e) {
+      if ($(e.target).is('#calt_modal') && window.innerWidth > 600) $('#calt_modal').removeClass('calt-mopen');
+    });
+
+    let _ddb = null;
+    $('#calt_modal_date').on('input', function () {
+      const val = this.value;
+      clearTimeout(_ddb);
+      _ddb = setTimeout(async () => {
+        getSettings().currentDate = val.trim();
+        $('#calt_current_date').val(val.trim());
+        save(); updateMeta(); await updatePrompt();
+      }, 400);
+    });
+
+    $('#calt_tabs').on('click', '.calt-tab', function () {
+      $('#calt_tabs .calt-tab').removeClass('active');
+      $(this).addClass('active');
+      activeTab = $(this).data('tab');
+      renderTabContent();
+    });
+
+    $('#calt_export_btn').on('click', exportData);
+    $('#calt_import_btn').on('click', importData);
+
+    renderTabContent();
   }
 
-  function wireChatEvents(){
+  // ─── Tab rendering ────────────────────────────────────────────────────────
+
+  function renderTabContent() {
+    const $b = $('#calt_tab_body');
+    if (!$b.length) return;
+    if      (activeTab === 'events')    $b.html(buildEventsTab());
+    else if (activeTab === 'deadlines') $b.html(buildDeadlinesTab());
+    else if (activeTab === 'rules')     $b.html(buildRulesTab());
+    bindTabEvents();
+  }
+
+  function eventRow(e, type) {
+    const dateBadge = e.date
+      ? '<span class="calt-ev-date">' + esc(e.date) + '</span>'
+      : '<span class="calt-ev-date calt-ev-date-empty">—</span>';
+    return '<div class="calt-ev-row" data-id="' + e.id + '" data-type="' + type + '">'
+      + '<div class="calt-ev-left">' + dateBadge + '<span class="calt-ev-text">' + esc(e.text) + '</span></div>'
+      + '<div class="calt-ev-acts">'
+      + '<button class="calt-ev-btn calt-ev-edit" data-id="' + e.id + '" data-type="' + type + '" title="Редактировать">✎</button>'
+      + '<button class="calt-ev-btn calt-ev-del"  data-id="' + e.id + '" data-type="' + type + '" title="Удалить">✕</button>'
+      + '</div></div>';
+  }
+
+  function buildEventsTab() {
+    const s = getSettings();
+    const listHtml = s.keyEvents.length
+      ? s.keyEvents.map(function(e) { return eventRow(e, 'event'); }).join('')
+      : '<div class="calt-empty">Событий нет.<br><small>Нажмите ✦ Сканировать — AI проанализирует чат и лорбук</small></div>';
+    return '<div class="calt-list-wrap"><div class="calt-list" id="calt_ev_list">' + listHtml + '</div></div>'
+      + '<div class="calt-add-row">'
+      + '<input class="calt-add-date" id="calt_add_ev_date" placeholder="Дата">'
+      + '<input class="calt-add-txt" id="calt_add_ev_txt" placeholder="Описание события...">'
+      + '<button class="calt-add-btn" id="calt_add_ev_btn">+ Добавить</button>'
+      + '</div>'
+      + '<div class="calt-scan-row">'
+      + '<span class="calt-scan-lbl">Сканировать</span>'
+      + '<input type="number" class="calt-depth-inp" id="calt_scan_ev_depth" value="' + getSettings().scanDepth + '" min="5" max="200">'
+      + '<span class="calt-scan-unit">сообщений</span>'
+      + '<button class="menu_button calt-scan-btn" id="calt_scan_ev_btn">✦ Сканировать</button>'
+      + '</div>'
+      + '<div class="calt-scan-status" id="calt_scan_ev_status"></div>';
+  }
+
+  function buildDeadlinesTab() {
+    const s = getSettings();
+    const listHtml = s.deadlines.length
+      ? s.deadlines.map(function(e) { return eventRow(e, 'deadline'); }).join('')
+      : '<div class="calt-empty">Дедлайнов нет.<br><small>Нажмите ✦ Сканировать — AI найдёт грядущие события</small></div>';
+    return '<div class="calt-list-wrap"><div class="calt-list" id="calt_dl_list">' + listHtml + '</div></div>'
+      + '<div class="calt-add-row">'
+      + '<input class="calt-add-date" id="calt_add_dl_date" placeholder="Дата">'
+      + '<input class="calt-add-txt" id="calt_add_dl_txt" placeholder="Грядущее событие...">'
+      + '<button class="calt-add-btn" id="calt_add_dl_btn">+ Добавить</button>'
+      + '</div>'
+      + '<div class="calt-scan-row">'
+      + '<span class="calt-scan-lbl">Сканировать</span>'
+      + '<input type="number" class="calt-depth-inp" id="calt_scan_dl_depth" value="' + getSettings().scanDepth + '" min="5" max="200">'
+      + '<span class="calt-scan-unit">сообщений</span>'
+      + '<button class="menu_button calt-scan-btn" id="calt_scan_dl_btn">✦ Сканировать</button>'
+      + '</div>'
+      + '<div class="calt-scan-status" id="calt_scan_dl_status"></div>';
+  }
+
+  function buildRulesTab() {
+    const s = getSettings();
+    return '<div class="calt-rules-wrap">'
+      + '<p class="calt-rules-hint">Опишите систему летоисчисления: названия месяцев, дней, лунные циклы, сезоны, эпохи. Инжектируется в каждый промпт.</p>'
+      + '<textarea class="calt-rules-edit" id="calt_rules_edit" rows="12" placeholder="Например:&#10;[Calendar: Standard Vaelorian, Year: 1000 A.P.]&#10;[Months: Vael, Eorel, Vorath...]&#10;[Week: 7 days — Aed, Fed, Bled, Sted, Med, Waed, Raed]&#10;[Moon Lyrath: 28-day cycle — YMNIR/AENOR/LYRATH VEL/OSSITH]">'
+      + esc(s.calendarRules || '') + '</textarea>'
+      + '<div class="calt-rules-actions">'
+      + '<button class="menu_button calt-scan-btn" id="calt_rules_extract_btn">✦ Извлечь из лорбука</button>'
+      + '<button class="menu_button calt-rules-save-btn" id="calt_rules_save_btn">💾 Сохранить</button>'
+      + '</div>'
+      + '<div class="calt-scan-status" id="calt_scan_rules_status"></div>'
+      + '</div>';
+  }
+
+  // ─── Tab event bindings ───────────────────────────────────────────────────
+
+  function bindTabEvents() {
+    // Delete
+    $('.calt-ev-del').off('click').on('click', function () {
+      const id = +$(this).data('id'), type = $(this).data('type');
+      const s = getSettings();
+      const arr = type === 'event' ? 'keyEvents' : 'deadlines';
+      const removed = s[arr].find(function(e) { return e.id === id; });
+      s[arr] = s[arr].filter(function(e) { return e.id !== id; });
+      save(); updatePrompt(); updateMeta(); renderTabContent();
+      toast(type === 'event' ? 'Событие удалено' : 'Дедлайн удалён', '#f87171', function() {
+        s[arr].push(removed);
+        s[arr].sort(function(a, b) { return a.id - b.id; });
+        save(); updatePrompt(); updateMeta(); renderTabContent();
+      });
+    });
+
+    // Edit
+    $('.calt-ev-edit').off('click').on('click', function () {
+      openEditModal(+$(this).data('id'), $(this).data('type'));
+    });
+
+    // Add event
+    $('#calt_add_ev_btn').off('click').on('click', function() {
+      const date = $('#calt_add_ev_date').val().trim();
+      const text = $('#calt_add_ev_txt').val().trim();
+      if (!text) { $('#calt_add_ev_txt').focus(); return; }
+      const s = getSettings();
+      s.keyEvents.push({ id: s.nextEventId++, date: date, text: text });
+      save(); updatePrompt(); updateMeta();
+      $('#calt_add_ev_date').val(''); $('#calt_add_ev_txt').val('');
+      renderTabContent();
+    });
+    $('#calt_add_ev_txt').off('keydown').on('keydown', function(e) { if (e.key === 'Enter') $('#calt_add_ev_btn').click(); });
+
+    // Add deadline
+    $('#calt_add_dl_btn').off('click').on('click', function() {
+      const date = $('#calt_add_dl_date').val().trim();
+      const text = $('#calt_add_dl_txt').val().trim();
+      if (!text) { $('#calt_add_dl_txt').focus(); return; }
+      const s = getSettings();
+      s.deadlines.push({ id: s.nextDeadlineId++, date: date, text: text });
+      save(); updatePrompt(); updateMeta();
+      $('#calt_add_dl_date').val(''); $('#calt_add_dl_txt').val('');
+      renderTabContent();
+    });
+    $('#calt_add_dl_txt').off('keydown').on('keydown', function(e) { if (e.key === 'Enter') $('#calt_add_dl_btn').click(); });
+
+    // Depth persist
+    $('#calt_scan_ev_depth, #calt_scan_dl_depth').off('change').on('change', function() {
+      getSettings().scanDepth = +this.value || 20; save();
+    });
+
+    // Scan Key Events
+    $('#calt_scan_ev_btn').off('click').on('click', async function () {
+      const $btn = $(this), $st = $('#calt_scan_ev_status');
+      const depth = +$('#calt_scan_ev_depth').val() || 20;
+      $btn.prop('disabled', true).text('Сканирую…');
+      $st.css('color', '#7a8499').text('Анализирую чат и лорбук…');
+      try {
+        const s = getSettings();
+        const snapshot = JSON.stringify(s.keyEvents);
+        const events = await scanKeyEvents(depth);
+        if (events.length) {
+          s.keyEvents = events;
+          s.nextEventId = Math.max.apply(null, events.map(function(e){return e.id;}).concat([s.nextEventId - 1])) + 1;
+          save(); updatePrompt(); updateMeta(); renderTabContent();
+          $st.css('color', '#34d399').text('✅ Найдено ' + events.length + ' событий');
+          toast('Таймлайн обновлён', '#34d399', function() {
+            s.keyEvents = JSON.parse(snapshot);
+            save(); updatePrompt(); updateMeta(); renderTabContent();
+          });
+        } else {
+          $st.css('color', '#f59e0b').text('Новых событий не обнаружено');
+        }
+      } catch (e) { $st.css('color', '#f87171').text('✗ ' + e.message); }
+      $btn.prop('disabled', false).text('✦ Сканировать');
+    });
+
+    // Scan Deadlines
+    $('#calt_scan_dl_btn').off('click').on('click', async function () {
+      const $btn = $(this), $st = $('#calt_scan_dl_status');
+      const depth = +$('#calt_scan_dl_depth').val() || 20;
+      $btn.prop('disabled', true).text('Сканирую…');
+      $st.css('color', '#7a8499').text('Анализирую чат и лорбук…');
+      try {
+        const s = getSettings();
+        const snapshot = JSON.stringify(s.deadlines);
+        const deadlines = await scanDeadlines(depth);
+        if (deadlines.length) {
+          s.deadlines = deadlines;
+          s.nextDeadlineId = Math.max.apply(null, deadlines.map(function(e){return e.id;}).concat([s.nextDeadlineId - 1])) + 1;
+          save(); updatePrompt(); updateMeta(); renderTabContent();
+          $st.css('color', '#34d399').text('✅ Найдено ' + deadlines.length + ' событий');
+          toast('Дедлайны обновлены', '#fbbf24', function() {
+            s.deadlines = JSON.parse(snapshot);
+            save(); updatePrompt(); updateMeta(); renderTabContent();
+          });
+        } else {
+          $st.css('color', '#f59e0b').text('Грядущих событий не обнаружено');
+        }
+      } catch (e) { $st.css('color', '#f87171').text('✗ ' + e.message); }
+      $btn.prop('disabled', false).text('✦ Сканировать');
+    });
+
+    // Rules save
+    $('#calt_rules_save_btn').off('click').on('click', async function() {
+      getSettings().calendarRules = $('#calt_rules_edit').val();
+      save(); await updatePrompt();
+      toast('Правила сохранены', '#a78bfa');
+      $('#calt_scan_rules_status').css('color', '#34d399').text('✅ Сохранено');
+    });
+
+    // Rules extract
+    $('#calt_rules_extract_btn').off('click').on('click', async function () {
+      const $btn = $(this), $st = $('#calt_scan_rules_status');
+      $btn.prop('disabled', true).text('Извлекаю…');
+      $st.css('color', '#7a8499').text('Анализирую лорбук…');
+      try {
+        const lore = getLorebook();
+        if (!lore) {
+          $st.css('color', '#f59e0b').text('Лорбук пуст или недоступен');
+          $btn.prop('disabled', false).text('✦ Извлечь из лорбука');
+          return;
+        }
+        const sys = 'You are a calendar system extractor. From the provided lorebook text, extract ONLY timekeeping-related information: calendar name, year system, month names, day/week names, seasons, lunar cycles, time units, special dates.\nFormat as clean concise lines like: [Key: value]. No markdown, no headers, no commentary. Max 25 lines. Preserve original terminology exactly.';
+        const result = await aiGenerate('LOREBOOK TEXT:\n' + lore.slice(0, 5000) + '\n\nExtract all calendar and timekeeping rules:', sys);
+        $('#calt_rules_edit').val(result.trim());
+        $st.css('color', '#34d399').text('✅ Извлечено — нажмите Сохранить');
+        toast('Правила извлечены из лорбука', '#a78bfa');
+      } catch (e) { $st.css('color', '#f87171').text('✗ ' + e.message); }
+      $btn.prop('disabled', false).text('✦ Извлечь из лорбука');
+    });
+  }
+
+  // ─── Edit modal ───────────────────────────────────────────────────────────
+
+  function openEditModal(id, type) {
+    const s = getSettings();
+    const arr  = type === 'event' ? s.keyEvents : s.deadlines;
+    const item = arr.find(function(e) { return e.id === id; });
+    if (!item) return;
+
+    $('.calt-edit-overlay').remove();
+    $('body').append(
+      '<div class="calt-edit-overlay calt-eopen">'
+      + '<div class="calt-edit-box">'
+      + '<div class="calt-edit-hdr"><span>' + (type === 'event' ? '⚔ Редактировать событие' : '⏳ Редактировать дедлайн') + '</span>'
+      + '<button class="calt-edit-x" id="calt_edit_x">✕</button></div>'
+      + '<div class="calt-edit-body">'
+      + '<div class="calt-elabel">Дата</div>'
+      + '<input class="calt-einput" id="calt_edit_date" value="' + esc(item.date || '') + '" placeholder="напр. 5 Jan 301 O.F.">'
+      + '<div class="calt-elabel" style="margin-top:8px">Описание</div>'
+      + '<textarea class="calt-etextarea" id="calt_edit_text">' + esc(item.text) + '</textarea>'
+      + '</div>'
+      + '<div class="calt-edit-footer">'
+      + '<button class="menu_button" id="calt_edit_cancel">Отмена</button>'
+      + '<button class="menu_button calt-save-btn" id="calt_edit_save">💾 Сохранить</button>'
+      + '</div></div></div>');
+
+    $('#calt_edit_x, #calt_edit_cancel').on('click', function() { $('.calt-edit-overlay').remove(); });
+    $('#calt_edit_save').on('click', function() {
+      const newDate = $('#calt_edit_date').val().trim();
+      const newText = $('#calt_edit_text').val().trim();
+      if (!newText) return;
+      item.date = newDate; item.text = newText;
+      save(); updatePrompt(); updateMeta(); renderTabContent();
+      $('.calt-edit-overlay').remove();
+      toast('Сохранено', '#34d399');
+    });
+    $('#calt_edit_text').on('keydown', function(e) { if (e.key === 'Enter' && e.ctrlKey) $('#calt_edit_save').click(); });
+  }
+
+  // ─── Export / Import ──────────────────────────────────────────────────────
+
+  function exportData() {
+    const s = getSettings();
+    const blob = new Blob([JSON.stringify({
+      currentDate: s.currentDate, keyEvents: s.keyEvents,
+      deadlines: s.deadlines, calendarRules: s.calendarRules,
+    }, null, 2)], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'calendar_tracker_' + Date.now() + '.json';
+    a.click();
+    toast('Данные экспортированы', '#34d399');
+  }
+
+  function importData() {
+    const inp = document.createElement('input');
+    inp.type = 'file'; inp.accept = '.json';
+    inp.onchange = function(e) {
+      const file = e.target.files[0]; if (!file) return;
+      const reader = new FileReader();
+      reader.onload = function(ev) {
+        try {
+          const data = JSON.parse(ev.target.result);
+          const s = getSettings();
+          if (data.currentDate)              { s.currentDate = data.currentDate; $('#calt_current_date, #calt_modal_date').val(s.currentDate); }
+          if (Array.isArray(data.keyEvents)) s.keyEvents  = data.keyEvents;
+          if (Array.isArray(data.deadlines)) s.deadlines  = data.deadlines;
+          if (data.calendarRules)            s.calendarRules = data.calendarRules;
+          save(); updatePrompt(); updateMeta(); renderTabContent();
+          toast('Данные импортированы', '#34d399');
+        } catch (err) { toast('Ошибка импорта — неверный формат файла', '#f87171'); }
+      };
+      reader.readAsText(file);
+    };
+    inp.click();
+  }
+
+  // ─── Auto-scan ────────────────────────────────────────────────────────────
+
+  async function tryAutoScan() {
+    const s = getSettings();
+    if (!s.autoScan || !s.enabled) return;
+    const chat = ctx().chat || [];
+    if (chat.length <= _lastAutoLen || (chat.length - _lastAutoLen) < 10) return;
+    _lastAutoLen = chat.length;
+
+    clearTimeout(_autoScanTimer);
+    _autoScanTimer = setTimeout(async function() {
+      try {
+        const evSnap = JSON.stringify(s.keyEvents);
+        const dlSnap = JSON.stringify(s.deadlines);
+        const results = await Promise.all([scanKeyEvents(s.scanDepth), scanDeadlines(s.scanDepth)]);
+        const events = results[0], deadlines = results[1];
+        let changed = false;
+        if (events.length)    { s.keyEvents  = events;    s.nextEventId    = Math.max.apply(null, events.map(function(e){return e.id;}).concat([s.nextEventId-1]))+1;    changed = true; }
+        if (deadlines.length) { s.deadlines  = deadlines; s.nextDeadlineId = Math.max.apply(null, deadlines.map(function(e){return e.id;}).concat([s.nextDeadlineId-1]))+1; changed = true; }
+        if (changed) {
+          save(); updatePrompt(); updateMeta();
+          if ($('#calt_modal').hasClass('calt-mopen')) renderTabContent();
+          toast('Таймлайн обновлён автоматически', '#34d399', function() {
+            s.keyEvents  = JSON.parse(evSnap);
+            s.deadlines  = JSON.parse(dlSnap);
+            save(); updatePrompt(); updateMeta();
+            if ($('#calt_modal').hasClass('calt-mopen')) renderTabContent();
+          });
+        }
+      } catch (e) { console.warn('[CalTracker] auto-scan failed:', e.message); }
+    }, 2000);
+  }
+
+  // ─── Utility ──────────────────────────────────────────────────────────────
+
+  function esc(s) {
+    return String(s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
+  // ─── Wire ST events ───────────────────────────────────────────────────────
+
+  function wireEvents() {
     const { eventSource, event_types } = ctx();
 
-    eventSource.on(event_types.APP_READY, async()=>{
-      ensureTracker(); mountSettingsUi(); await updatePrompt();
-    });
-
-    eventSource.on(event_types.CHAT_CHANGED, async()=>{
-      _cleanedMsgs.clear(); await updatePrompt();
-      if($('#ct_tracker').hasClass('ct-open')) renderDrawer();
-    });
-
-    // KEY FIX: update prompt BEFORE the model generates (same as FMT)
-    eventSource.on(event_types.MESSAGE_SENT, async()=>{
+    eventSource.on(event_types.APP_READY, async function() {
+      mountSettingsUi();
       await updatePrompt();
     });
 
-    eventSource.on(event_types.MESSAGE_RECEIVED, async(idx)=>{
-      processChatMessage(idx);
+    eventSource.on(event_types.CHAT_CHANGED, async function() {
+      _lastAutoLen = 0;
+      await updatePrompt(); updateMeta();
+      if ($('#calt_modal').hasClass('calt-mopen')) renderTabContent();
+    });
+
+    eventSource.on(event_types.MESSAGE_RECEIVED, async function() {
       await updatePrompt();
+      await tryAutoScan();
     });
 
-    eventSource.on(event_types.MESSAGE_UPDATED, async(idx)=>{
-      _cleanedMsgs.delete(idx); processChatMessage(idx); await updatePrompt();
-    });
-
-    if (event_types.GENERATION_ENDED){
-      eventSource.on(event_types.GENERATION_ENDED, async()=>{
-        const chat=ctx().chat||[], last=chat.length-1;
-        if(last>=0&&!chat[last].is_user) processChatMessage(last);
+    if (event_types.GENERATION_ENDED) {
+      eventSource.on(event_types.GENERATION_ENDED, async function() {
         await updatePrompt();
       });
     }
   }
 
-  // ─── Boot ─────────────────────────────────────────────────────────────────────
+  // ─── Boot ─────────────────────────────────────────────────────────────────
 
-  jQuery(()=>{
-    try{ wireChatEvents(); console.log('[Citadel Tongue v6] ✦ loaded'); }
-    catch(e){ console.error('[Citadel Tongue] init failed',e); }
+  jQuery(function() {
+    try {
+      wireEvents();
+      console.log('[Calendar Tracker v1.1] ✦ loaded');
+    } catch (e) {
+      console.error('[Calendar Tracker] init failed', e);
+    }
   });
 
 })();
