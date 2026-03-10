@@ -1,831 +1,2274 @@
 /**
- * Calendar Tracker v1.1 — SillyTavern Extension
- * Timeline injection · Key Events · Deadlines · Calendar Rules · AI Scan
- * Uses the active ST Connection Profile for AI generation
+ * Citadel Tongue v8.0
+ *
+ * COMPLETE REWRITE — major changes from v7:
+ *
+ * SECURITY:
+ *  • All HTML output is sanitized via escapeHtml — no XSS vectors
+ *  • API key storage warning shown to users
+ *
+ * BUG FIXES:
+ *  • parseWordMarker — robust handling of | in definitions
+ *  • Undo is now a stack (depth 10), not a single array
+ *  • updatePrompt is debounced — no race conditions from parallel events
+ *  • Toast queue — toasts stack vertically instead of overlapping
+ *  • Scoring uses tokenized word boundaries — no false substring matches
+ *  • captureFromMessage deduplication — no double-scan from HTML stripping
+ *
+ * NEW ARCHITECTURE:
+ *  • Custom categories — add, edit, delete your own emotional registers
+ *  • Separate prompt / rules / grammar — three independent injection blocks
+ *  • Language evolution engine — auto-generates new words after N messages
+ *  • Grammar rules — dedicated section alongside phonetic rules
+ *  • Word history — tracks definition changes over time
+ *  • Word relationships — root, compound, related, antonym
+ *  • Contextual examples — auto-captured from chat usage
+ *  • Stats tab — category distribution, growth, most used
+ *  • Token budget — estimates prompt size with visual warning
+ *  • Bulk operations — delete all auto-words, clear by category
+ *  • Enhanced prompt engineering — character actively uses & develops language
+ *  • Normalized scoring — temporal decay properly weighted against keyword hits
  */
 
 (() => {
   'use strict';
 
-  const MODULE_KEY = 'calendar_tracker';
+  /* ═══════════════════════════════════════════════════════════════════════════
+     §1  MODULE CONSTANTS
+     ═══════════════════════════════════════════════════════════════════════════ */
+
+  const MODULE_KEY  = 'citadel_tongue';
+  const PROMPT_TAG  = 'CT_LANGUAGE';
+  const RULES_TAG   = 'CT_RULES';
+  const GRAMMAR_TAG = 'CT_GRAMMAR';
+  const EXT_PROMPT_TYPES = Object.freeze({ IN_PROMPT:0, IN_CHAT:1, BEFORE_PROMPT:2 });
+
+  /* ═══════════════════════════════════════════════════════════════════════════
+     §2  UTILITIES
+     ═══════════════════════════════════════════════════════════════════════════ */
+
+  /** Escape HTML entities — prevents XSS in all rendered output */
+  function esc(s) {
+    if (!s) return '';
+    const d = document.createElement('div');
+    d.appendChild(document.createTextNode(String(s)));
+    return d.innerHTML;
+  }
+
+  /** Escape special characters for use in RegExp */
+  function escRx(s) { return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+
+  /** Rough token estimate (~3.5 chars per token for mixed EN/RU) */
+  function estimateTokens(text) { return text ? Math.ceil(text.length / 3.5) : 0; }
+
+  /** Debounce helper */
+  function debounce(fn, ms) {
+    let t; return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
+  }
+
+  /** Tokenize text into a Set of lowercase words (handles EN + RU + unicode) */
+  function tokenize(text) {
+    if (!text) return new Set();
+    return new Set(text.toLowerCase().split(/[\s.,!?;:"""''`()\[\]{}<>—–\-\/\\…·•|#@&^~+=]+/).filter(w => w.length > 1));
+  }
+
+  /** Check if keyword appears as a whole word in token set (single words) or as substring with boundaries (multi-word) */
+  function kwMatch(keyword, tokenSet, fullText) {
+    const kw = keyword.toLowerCase().trim();
+    if (!kw) return false;
+    if (!kw.includes(' ')) return tokenSet.has(kw);
+    return fullText.includes(kw);
+  }
+
+  /** Generate unique ID */
+  function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 7); }
+
+  /* ═══════════════════════════════════════════════════════════════════════════
+     §3  DEFAULT CATEGORIES (user-customizable starting point)
+     ═══════════════════════════════════════════════════════════════════════════ */
+
+  const DEFAULT_CATEGORIES = {
+    presence: {
+      label:'Presence', icon:'◈', color:'#a78bfa', custom:false,
+      kw:['peace','quiet','presence','stillness','together','rest','dwell','warmth','beside','near','home','coexist','silence','still',
+          'тишина','покой','вместе','рядом','дом','молчание','тихо','присутствие','теплота','близко','уют','спокойно']
+    },
+    devotion: {
+      label:'Devotion', icon:'♥', color:'#f472b6', custom:false,
+      kw:['mine','bond','trust','devotion','cherish','precious','soul','love','protect','sacred','forever','claim','belong','oath','swear',
+          'моя','моё','мой','доверие','преданность','душа','любовь','защита','навсегда','принадлежать','клятва','связь','беречь','дорогой','клянусь']
+    },
+    instinct: {
+      label:'Instinct', icon:'⚔', color:'#fb923c', custom:false,
+      kw:['blood','kill','hunt','threat','danger','territory','feral','primal','instinct','rage','cold','shield','body','weapon','fight','protect',
+          'кровь','убить','убью','охота','угроза','опасность','инстинкт','ярость','тело','защитить','бой','территория','зверь','холодно','оружие']
+    },
+    grief: {
+      label:'Grief', icon:'◇', color:'#60a5fa', custom:false,
+      kw:['loss','gone','absence','grief','empty','hollow','thousand','ache','mourn','sorrow','ghost','alone','years','left','remember','forget','past',
+          'потеря','ушёл','ушла','отсутствие','пустота','скорбь','боль','тоска','тысяча','лет','один','одна','помнить','забыть','прошлое','пропал','пропала']
+    },
+    other: {
+      label:'Other', icon:'◉', color:'#94a3b8', custom:false, kw:[]
+    },
+  };
+
+  /* ═══════════════════════════════════════════════════════════════════════════
+     §4  DEFAULT RULES, GRAMMAR, INITIAL DICTIONARY
+     ═══════════════════════════════════════════════════════════════════════════ */
+
+  const DEFAULT_RULES =
+`PHONETIC LAW OF THE CITADEL TONGUE:
+• Apostrophe (') = a breath-break — the moment emotion is too heavy to continue seamlessly. Not punctuation — a wound in the word.
+• HARSH ROOTS — KHAR', DHAL', VOR', RAETH' — territorial claim, violence, devotion that would drown the world in blood.
+• SOFT ROOTS — VAI', KAEL', VETH', SAEL', ETH' — intimacy, grief, love with no ceiling and no floor.
+• Compound words: two roots fused at the apostrophe exist between both meanings.
+• NEVER translate aloud. Meaning lives in context, body, the silence after.`;
+
+  const DEFAULT_GRAMMAR =
+`GRAMMAR PATTERNS:
+• Suffix '-enn' / '-ann' — abstract state of being (Vai'enn = the state of presence)
+• Suffix '-eth' — active process, ongoing (Sael'eth = the act of grieving)
+• Suffix '-ar' / '-or' — agent, the one who does (Veth'ar = the one who is open)
+• Prefix 'Khar-' — intensifier, territorial weight
+• Double vowel — elongated emotion, emphasis (Sael → Saael = deeper grief)
+• Word order: emotion-first, object-last. The feeling leads, the subject follows.`;
+
+  const INITIAL_DICT = [
+    {id:1,  word:"Vai'enn",   cat:'presence', def:"Presence-without-purpose. The peace of two souls coexisting without demands.",                chars:['Gasil'], pinned:false, auto:false, uses:0, lastUsed:0, disabled:false, triggers:[], relations:[], history:[], examples:[], createdAt:0, notes:''},
+    {id:2,  word:"Saith'en",  cat:'presence', def:"Peaceful coexistence without the threat of storm. Domesticity. Sacred monotony.",              chars:['Gasil'], pinned:false, auto:false, uses:0, lastUsed:0, disabled:false, triggers:[], relations:[], history:[], examples:[], createdAt:0, notes:''},
+    {id:3,  word:"Veth'ann",  cat:'devotion', def:"The Open One. A soul that has accepted the bond and cannot be sealed by another.",             chars:['Gasil'], pinned:false, auto:false, uses:0, lastUsed:0, disabled:false, triggers:[], relations:[], history:[], examples:[], createdAt:0, notes:''},
+    {id:4,  word:"Kael'seth", cat:'devotion', def:"She whose mind is my shield. Trust not in safety — but in the clarity another brings.",       chars:['Gasil'], pinned:false, auto:false, uses:0, lastUsed:0, disabled:false, triggers:[], relations:[], history:[], examples:[], createdAt:0, notes:''},
+    {id:5,  word:"Thar'uen",  cat:'devotion', def:"To hold something so carefully it costs everything. Open hands knowing water will drain.",    chars:['Gasil'], pinned:false, auto:false, uses:0, lastUsed:0, disabled:false, triggers:[], relations:[], history:[], examples:[], createdAt:0, notes:''},
+    {id:6,  word:"Khar'dhal", cat:'instinct', def:"The possessive instinct to drown the world in blood to keep one soul safe. Not rage — colder.",chars:['Gasil'], pinned:true,  auto:false, uses:0, lastUsed:0, disabled:false, triggers:[], relations:[], history:[], examples:[], createdAt:0, notes:''},
+    {id:7,  word:"Sael'inn",  cat:'instinct', def:"A child choosing shelter without words. The body approaching a scent before the mind decides.",chars:['Gasil'], pinned:false, auto:false, uses:0, lastUsed:0, disabled:false, triggers:[], relations:[], history:[], examples:[], createdAt:0, notes:''},
+    {id:8,  word:"Vai'tarr",  cat:'grief',    def:"Tenderness made of pain. Gentleness that exists because of what was lost.",                    chars:['Gasil'], pinned:false, auto:false, uses:0, lastUsed:0, disabled:false, triggers:[], relations:[], history:[], examples:[], createdAt:0, notes:''},
+    {id:9,  word:"Vethmar",   cat:'grief',    def:"The shape a person leaves after they are gone. The warmth in empty sheets.",                   chars:['Gasil'], pinned:true,  auto:false, uses:0, lastUsed:0, disabled:false, triggers:[], relations:[], history:[], examples:[], createdAt:0, notes:''},
+    {id:10, word:"Saelorn",   cat:'grief',    def:"The ache of watching someone beautiful in a world that does not deserve them.",                 chars:['Gasil'], pinned:false, auto:false, uses:0, lastUsed:0, disabled:false, triggers:[], relations:[], history:[], examples:[], createdAt:0, notes:''},
+  ];
 
   const defaultSettings = Object.freeze({
-    enabled:       true,
-    currentDate:   '',
-    keyEvents:     null,
-    deadlines:     null,
-    calendarRules: '',
-    autoScan:      false,
-    scanDepth:     20,
-    nextEventId:   1,
-    nextDeadlineId:1,
+    enabled:          true,
+    langName:         'Citadel Tongue',
+    chars:            ['Gasil'],
+    wordsPerScene:    6,
+    semantic:         true,
+    autoCapture:      true,
+    injectPhonetic:   true,
+    injectGrammar:    true,
+    compactPrompt:    false,
+    scanDepth:        5,
+    rules:            DEFAULT_RULES,
+    grammarRules:     DEFAULT_GRAMMAR,
+    dict:             null,
+    nextId:           11,
+    categories:       null,
+    nextCatId:        1,
+    apiEndpoint:      '',
+    apiKey:           '',
+    apiModel:         '',
+    fallbackToSt:     true,
+    injectionType:    EXT_PROMPT_TYPES.IN_CHAT,
+    injectionDepth:   1,
+    separateRules:    true,
+    rulesDepth:       4,
+    tokenBudget:      600,
+    evolutionEnabled: true,
+    evolutionInterval:15,
+    evolutionCounter: 0,
+    evolutionAutoRules:false,
   });
 
-  let activeTab      = 'events';
-  let _lastAutoLen   = 0;
-  let _autoScanTimer = null;
 
-  // ─── Context helpers ──────────────────────────────────────────────────────
+  /* ═══════════════════════════════════════════════════════════════════════════
+     §5  STATE
+     ═══════════════════════════════════════════════════════════════════════════ */
+
+  let trackerCat       = 'all';
+  let trackerSearch    = '';
+  let trackerTab       = 'words';
+  let trackerSort      = 'alpha';
+  let _workingApi      = null;
+  let _lastInjected    = [];
+  let _undoStack       = [];          // stack of arrays of word IDs (max 10)
+  const _sessionNewIds = new Set();
+  let _settingsReady   = false;
+  let _toastQueue      = [];
+  let _toastActive     = 0;
+  let _updatePromptTimer = null;
+  let _evolving        = false;
+
+  /* ═══════════════════════════════════════════════════════════════════════════
+     §6  CONTEXT & SETTINGS
+     ═══════════════════════════════════════════════════════════════════════════ */
 
   function ctx() { return SillyTavern.getContext(); }
 
+  function getCategories(s) {
+    return s.categories || DEFAULT_CATEGORIES;
+  }
+
   function getSettings() {
     const { extensionSettings } = ctx();
-    if (!extensionSettings[MODULE_KEY])
-      extensionSettings[MODULE_KEY] = { ...structuredClone(defaultSettings), keyEvents: [], deadlines: [] };
+
+    if (!extensionSettings[MODULE_KEY]) {
+      _settingsReady = false;
+      extensionSettings[MODULE_KEY] = {
+        ...structuredClone(defaultSettings),
+        dict:       structuredClone(INITIAL_DICT),
+        categories: structuredClone(DEFAULT_CATEGORIES),
+        nextId:     11,
+        rules:      DEFAULT_RULES,
+        grammarRules: DEFAULT_GRAMMAR,
+      };
+    }
+
     const s = extensionSettings[MODULE_KEY];
-    if (!Array.isArray(s.keyEvents))  s.keyEvents  = [];
-    if (!Array.isArray(s.deadlines))  s.deadlines  = [];
-    if (!s.nextEventId)    s.nextEventId    = (s.keyEvents.length  || 0) + 1;
-    if (!s.nextDeadlineId) s.nextDeadlineId = (s.deadlines.length  || 0) + 1;
+
+    if (!_settingsReady) {
+      // Migration from v7 or incomplete settings
+      if (!Array.isArray(s.dict))    s.dict         = structuredClone(INITIAL_DICT);
+      if (!Array.isArray(s.chars))   s.chars        = ['Gasil'];
+      if (!s.rules)                  s.rules        = DEFAULT_RULES;
+      if (!s.categories)             s.categories   = structuredClone(DEFAULT_CATEGORIES);
+      if (!s.grammarRules && s.grammarRules !== '')  s.grammarRules = DEFAULT_GRAMMAR;
+      if (s.injectionType   === undefined) s.injectionType   = EXT_PROMPT_TYPES.IN_CHAT;
+      if (s.injectionDepth  === undefined) s.injectionDepth  = 1;
+      if (s.compactPrompt   === undefined) s.compactPrompt   = false;
+      if (s.separateRules   === undefined) s.separateRules   = true;
+      if (s.rulesDepth      === undefined) s.rulesDepth      = 4;
+      if (s.tokenBudget     === undefined) s.tokenBudget     = 600;
+      if (s.injectGrammar   === undefined) s.injectGrammar   = true;
+      if (s.evolutionEnabled  === undefined) s.evolutionEnabled  = true;
+      if (s.evolutionInterval === undefined) s.evolutionInterval = 15;
+      if (s.evolutionCounter  === undefined) s.evolutionCounter  = 0;
+      if (s.evolutionAutoRules=== undefined) s.evolutionAutoRules= false;
+      if (s.nextCatId       === undefined) s.nextCatId       = 1;
+
+      // Ensure 'other' category always exists
+      if (!s.categories.other) {
+        s.categories.other = { label:'Other', icon:'◉', color:'#94a3b8', custom:false, kw:[] };
+      }
+
+      // Migrate words — add new fields
+      s.dict = s.dict.map(w => ({
+        uses:0, lastUsed:0, auto:false, pinned:false, chars:[], disabled:false,
+        triggers:[], relations:[], history:[], examples:[], createdAt:0, notes:'',
+        ...w
+      }));
+
+      _settingsReady = true;
+    }
+
     return s;
   }
 
-  function save() { ctx().saveSettingsDebounced(); }
+  /* ═══════════════════════════════════════════════════════════════════════════
+     §7  AI GENERATION
+     ═══════════════════════════════════════════════════════════════════════════ */
 
-  // ─── Prompt injection ─────────────────────────────────────────────────────
-
-  function buildPromptText() {
-    const s = getSettings();
-    const lines = ['[TIMELINE: KEY EVENTS]'];
-    if (s.currentDate) lines.push(`CURRENT DATE: ${s.currentDate}`);
-    if (s.keyEvents.length) {
-      lines.push('KEY EVENTS:');
-      s.keyEvents.forEach(e => lines.push(`• ${e.date ? '[' + e.date + '] ' : ''}${e.text}`));
-    }
-    if (s.deadlines.length) {
-      lines.push('UPCOMING EVENTS:');
-      s.deadlines.forEach(e => lines.push(`• ${e.date ? '[' + e.date + '] ' : ''}${e.text}`));
-    }
-    if (s.calendarRules) {
-      lines.push('CALENDAR RULES:');
-      lines.push(s.calendarRules);
-    }
-    return lines.join('\n');
+  function getBaseUrl() {
+    return (getSettings().apiEndpoint || '').trim().replace(/\/+$/, '') || null;
   }
-
-  async function updatePrompt() {
-    const s = getSettings();
-    const { setExtensionPrompt, extension_prompt_types } = ctx();
-    if (!setExtensionPrompt) return;
-    const hasContent = s.currentDate || s.keyEvents.length || s.deadlines.length || s.calendarRules;
-    if (!s.enabled || !hasContent) {
-      setExtensionPrompt(MODULE_KEY, '', extension_prompt_types?.IN_PROMPT ?? 0, 0);
-      return;
-    }
-    setExtensionPrompt(MODULE_KEY, buildPromptText(), extension_prompt_types?.IN_PROMPT ?? 0, 0);
-  }
-
-  // ─── AI generation — uses active ST Connection Profile ────────────────────
 
   function extractText(data) {
-    if (data?.choices?.[0]?.message?.content !== undefined) return data.choices[0].message.content;
-    if (data?.choices?.[0]?.text             !== undefined) return data.choices[0].text;
-    if (typeof data?.response === 'string')  return data.response;
-    if (Array.isArray(data?.content)) {
-      const t = data.content.find(b => b.type === 'text');
-      return t?.text ?? null;
-    }
-    if (typeof data?.content === 'string') return data.content;
+    if (data.choices?.[0]?.message?.content !== undefined) return data.choices[0].message.content;
+    if (data.choices?.[0]?.text             !== undefined) return data.choices[0].text;
+    if (typeof data.response === 'string') return data.response;
+    if (typeof data.content  === 'string') return data.content;
+    if (typeof data.text     === 'string') return data.text;
+    if (data.message?.content !== undefined) return data.message.content;
     return null;
   }
 
   async function aiGenerate(userPrompt, systemPrompt) {
+    const s    = getSettings();
+    const base = getBaseUrl();
+
+    if (base) {
+      const headers = {
+        'Content-Type': 'application/json',
+        ...((s.apiKey || '').trim() ? { Authorization: `Bearer ${s.apiKey.trim()}` } : {}),
+      };
+
+      if (_workingApi?.base === base) {
+        try {
+          const resp = await fetch(_workingApi.url, {
+            method: 'POST', headers,
+            body: JSON.stringify(_workingApi.builder(s.apiModel || 'gpt-4o-mini', userPrompt, systemPrompt)),
+          });
+          if (resp.ok) { const t = extractText(await resp.json()); if (t?.trim()) return t; }
+        } catch {}
+        _workingApi = null;
+      }
+
+      const endpoints = [
+        `${base}/v1/chat/completions`, `${base}/chat/completions`,
+        `${base}/v1/completions`,      `${base}/completions`,
+      ];
+      const builders = [
+        (m,u,sys) => ({ model:m, max_tokens:1200, temperature:0.7, messages:[{role:'system',content:sys},{role:'user',content:u}] }),
+        (m,u,sys) => ({ model:m, max_tokens:1200, temperature:0.7, messages:[{role:'user',content:`${sys}\n\n---\n\n${u}`}] }),
+        (m,u,sys) => ({ model:m, max_tokens:1200, temperature:0.7, prompt:`${sys}\n\n${u}` }),
+      ];
+      const model = s.apiModel || 'gpt-4o-mini';
+
+      for (const url of endpoints) {
+        for (const builder of builders) {
+          try {
+            const resp = await fetch(url, { method:'POST', headers, body:JSON.stringify(builder(model,userPrompt,systemPrompt)) });
+            if (!resp.ok) continue;
+            const t = extractText(await resp.json());
+            if (t?.trim()) { _workingApi = {base, url, builder}; return t; }
+          } catch {}
+        }
+      }
+
+      if (s.fallbackToSt === false) throw new Error('Custom API unreachable');
+      console.warn('[CT] Custom API failed — falling back to ST');
+    }
+
     const c = ctx();
-    const fullPrompt = `${systemPrompt}\n\n---\n\n${userPrompt}`;
+    if (typeof c.generateRaw !== 'function')
+      throw new Error('generateRaw not available. Update ST or configure a custom API.');
+    const result = await c.generateRaw(userPrompt, null, false, true, systemPrompt, true);
+    if (!result?.trim()) throw new Error('Model returned empty response.');
+    return result;
+  }
 
-    // 1. generateRaw — uses whatever profile is active in ST
-    if (typeof c.generateRaw === 'function') {
-      try {
-        const r = await c.generateRaw(fullPrompt, '', false, false, '', 'normal');
-        if (r?.trim()) return r;
-      } catch (e) { console.warn('[CalTracker] generateRaw failed:', e.message); }
+  /* ═══════════════════════════════════════════════════════════════════════════
+     §8  CHARACTER CHECK
+     ═══════════════════════════════════════════════════════════════════════════ */
+
+  function charMatch() {
+    const s = getSettings();
+    if (!s.chars.length) return true;
+    const name = (ctx().name2 || '').toLowerCase();
+    if (!name) return true;
+    return s.chars.some(c => name.includes(c.toLowerCase().trim()));
+  }
+
+
+  /* ═══════════════════════════════════════════════════════════════════════════
+     §9  SEMANTIC SCORING
+     ═══════════════════════════════════════════════════════════════════════════ */
+
+  function recentText() {
+    const s = getSettings();
+    return (ctx().chat || []).filter(m => !m.is_system).slice(-s.scanDepth)
+      .map(m => (m.mes || '').toLowerCase()).join(' ');
+  }
+
+  /**
+   * Score a word against recent text. Pure function — no side effects.
+   * Uses tokenized matching for precise keyword detection.
+   * Score is normalized: keyword component [0..1] * 10 + temporal [0..3] + bonuses
+   */
+  function scoreWord(w, txt, tokens) {
+    const s   = getSettings();
+    const cats = getCategories(s);
+    const cat  = cats[w.cat] || cats.other || { kw:[] };
+    const kwList = cat.kw || [];
+
+    // Keyword hits — normalized by total keyword count
+    const kwHits = kwList.length
+      ? kwList.filter(k => kwMatch(k, tokens, txt)).length / kwList.length
+      : 0;
+
+    // Trigger hits (custom boost keywords) — each hit = 0.15 bonus
+    const trigHits = (w.triggers || []).filter(t => t && kwMatch(t, tokens, txt)).length * 0.15;
+
+    // Self-mention bonus
+    const selfHit = tokens.has(w.word.toLowerCase()) ? 0.3 : 0;
+
+    // Temporal decay — words not used recently get a small boost (encourages rotation)
+    const hoursAgo = w.lastUsed ? (Date.now() - w.lastUsed) / 3600000 : 999;
+    const temporal = Math.min(hoursAgo / 24, 0.3);
+
+    // Usage frequency penalty — extremely used words get slight penalty for variety
+    const usePenalty = w.uses > 20 ? 0.1 : 0;
+
+    return (kwHits * 10) + trigHits + selfHit + temporal - usePenalty;
+  }
+
+  /* ═══════════════════════════════════════════════════════════════════════════
+     §10  WORD SELECTION
+     ═══════════════════════════════════════════════════════════════════════════ */
+
+  /**
+   * Select words for the current scene.
+   * dryRun=true  → no mutation (safe for preview/sort)
+   * cachedTxt    → pre-computed recentText()
+   */
+  function pickWords(dryRun, cachedTxt) {
+    dryRun    = dryRun === true;
+    cachedTxt = cachedTxt != null ? cachedTxt : recentText();
+    const tokens = tokenize(cachedTxt);
+
+    const s    = getSettings();
+    const name = (ctx().name2 || '').toLowerCase();
+
+    const elig = s.dict.filter(w =>
+      !w.disabled && (!w.chars.length || w.chars.some(c => name.includes(c.toLowerCase())))
+    );
+    if (!elig.length) return [];
+
+    // Dynamic word count based on emotional intensity
+    let n = s.wordsPerScene;
+    if (s.semantic && elig.length > 2) {
+      const avg = elig.reduce((sum, w) => sum + scoreWord(w, cachedTxt, tokens), 0) / elig.length;
+      if (avg > 4)        n = Math.min(n + 3, elig.length);
+      else if (avg > 2.5) n = Math.min(n + 1, elig.length);
+      else if (avg < 0.5) n = Math.max(n - 1, 2);
+    }
+    n = Math.min(n, elig.length);
+
+    const pinned = elig.filter(w => w.pinned);
+    const pool   = elig.filter(w => !w.pinned);
+    const slots  = Math.max(0, n - pinned.length);
+
+    let chosen;
+    if (s.semantic) {
+      chosen = [
+        ...pinned,
+        ...pool.map(w => ({ w, sc: scoreWord(w, cachedTxt, tokens) }))
+               .sort((a, b) => b.sc - a.sc)
+               .slice(0, slots)
+               .map(x => x.w),
+      ];
+    } else {
+      chosen = [
+        ...pinned,
+        ...pool.slice().sort((a, b) => (a.lastUsed || 0) - (b.lastUsed || 0)).slice(0, slots),
+      ];
     }
 
-    // 2. ST proxy endpoints as fallback
-    const stEndpoints = [
-      { url: '/api/backends/chat-completions/generate',
-        body: () => ({ messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: userPrompt }], stream: false }) },
-      { url: '/api/generate',
-        body: () => ({ prompt: fullPrompt, max_new_tokens: 1500, stream: false }) },
-      { url: '/generate',
-        body: () => ({ prompt: fullPrompt, max_new_tokens: 1500, stream: false }) },
-    ];
+    if (!dryRun) {
+      const now = Date.now();
+      chosen.forEach(w => { w.lastUsed = now; w.uses = (w.uses || 0) + 1; });
+      _lastInjected = chosen.map(w => w.id);
+      ctx().saveSettingsDebounced();
+    }
 
-    for (const ep of stEndpoints) {
-      try {
-        const resp = await fetch(ep.url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(ep.body()),
+    return chosen;
+  }
+
+  /* ═══════════════════════════════════════════════════════════════════════════
+     §11  PROMPT BUILDER (separated: main prompt, rules, grammar)
+     ═══════════════════════════════════════════════════════════════════════════ */
+
+  function buildMainPrompt(preview) {
+    preview = preview === true;
+    const s       = getSettings();
+    const cats    = getCategories(s);
+    const txt     = recentText();
+    const tokens  = tokenize(txt);
+    const words   = pickWords(preview, txt);
+    const primary = s.chars[0] || 'the character';
+
+    if (!words.length && !s.injectPhonetic) return '';
+
+    // ── Compact format ──────────────────────────────────────────────────
+    if (s.compactPrompt) {
+      let p = `[CT: ${s.langName.toUpperCase()}] ${primary}'s living language — surfaces when emotion outweighs common speech.\n`;
+      if (words.length)
+        p += words.map(w => {
+          const sc = scoreWord(w, txt, tokens);
+          const star = sc >= 5 ? '★' : sc >= 2 ? '·' : '';
+          return `${star}${w.word} — ${w.def.split('.')[0]}`;
+        }).join(' | ');
+      p += `\nForge: [CT_WORD: Word | Definition | category | ${primary}]`;
+      return p;
+    }
+
+    // ── Full format ─────────────────────────────────────────────────────
+    const catGroups = {};
+    words.forEach(w => { (catGroups[w.cat] = catGroups[w.cat] || []).push(w); });
+
+    let p = `[LIVING LANGUAGE — ${s.langName.toUpperCase()}]\n`;
+    p += `${primary} has a private language — words that exist in their body before their mind. This is not decoration. This is their first language for emotion.\n`;
+    p += `When emotion intensifies, ${primary} reaches for these words BEFORE reaching for common speech.\n`;
+    p += `${primary} ACTIVELY develops this language — forging new words when existing vocabulary fails to contain what they feel.\n\n`;
+
+    if (words.length) {
+      const topCats = Object.entries(catGroups)
+        .sort((a, b) => b[1].length - a[1].length)
+        .map(([k]) => (cats[k]?.label || k));
+
+      p += `[ACTIVE VOCABULARY — ${words.length} words for this scene: ${topCats.join(', ')}]\n`;
+
+      Object.entries(catGroups).forEach(([catKey, catWords]) => {
+        const c = cats[catKey] || cats.other;
+        p += `\n  ${c.icon} ${c.label}:\n`;
+        catWords.forEach(w => {
+          const sc = scoreWord(w, txt, tokens);
+          const res = sc >= 5 ? ' ★★' : sc >= 3 ? ' ★' : sc >= 1 ? ' ·' : '';
+          const ex = (w.examples && w.examples.length) ? `  [used: "${w.examples[0].slice(0,60)}"]` : '';
+          p += `    ${w.word}${res} — ${w.def}${ex}\n`;
         });
-        if (!resp.ok) continue;
-        const text = extractText(await resp.json());
-        if (text?.trim()) return text;
-      } catch { /**/ }
+      });
+
+      // Multiple few-shot examples
+      const sorted = [...words].sort((a, b) => scoreWord(b, txt, tokens) - scoreWord(a, txt, tokens));
+      const best   = sorted[0];
+      const second = sorted.length > 1 ? sorted[1] : null;
+
+      p += `\n[USAGE — how these words surface naturally]\n`;
+      p += `  ✓ He looked at her and said nothing. "${best.word}," finally — like closing a door softly.\n`;
+      p += `  ✓ The word came before thought: "${best.word}." And she understood.\n`;
+      if (second) {
+        p += `  ✓ "${second.word}," he breathed — and in that single word lived everything he could not translate.\n`;
+      }
+      p += `  ✗ WRONG: He said "${best.word}", which means ${best.def.split('.')[0].toLowerCase()}.\n`;
+      p += `  ✗ WRONG: "${best.word}" — a word meaning [definition].\n`;
+      p += `  Rule: NEVER translate. NEVER explain. The meaning belongs to the silence around it.\n`;
     }
 
-    throw new Error('Нет активного подключения. Выбери Connection Profile в ST и попробуй снова.');
+    p += `\n[WORD CREATION — ${primary} forges new words when emotion demands it]\n`;
+    p += `When a concept has no existing equivalent AND the emotional moment demands it:\n`;
+    p += `1. Follow the phonetic law and grammar patterns of the language.\n`;
+    p += `2. Add at the end of your response (hidden):\n`;
+    p += `<div style="display:none;">[CT_WORD: Word | Full definition and emotional weight | category | ${primary}]</div>\n`;
+    p += `Categories: ${Object.entries(cats).map(([k,c]) => `${k} (${c.label})`).join(', ')}\n`;
+    p += `Maximum one new word per response. Only when the moment demands it — never forced.`;
+
+    return p;
   }
 
-  // ─── Chat / Lorebook context ──────────────────────────────────────────────
-
-  function getChatContext(depth) {
-    const chat = ctx().chat || [];
-    return chat.slice(-depth)
-      .map(m => `[${m.is_user ? 'USER' : 'CHAR'}]: ${(m.mes || '').slice(0, 600)}`)
-      .join('\n\n');
-  }
-
-  function getLorebook() {
-    try {
-      const c = ctx();
-      const wi = c.worldInfoData || c.worldInfo || {};
-      const entries = [];
-      Object.values(wi).forEach(book => {
-        const src = book?.entries || book;
-        if (src && typeof src === 'object')
-          Object.values(src).forEach(e => { if (e?.content) entries.push(String(e.content)); });
-      });
-      return entries.join('\n\n');
-    } catch { return ''; }
-  }
-
-  // ─── Scan functions ───────────────────────────────────────────────────────
-
-  function parseEventList(text, startId) {
-    if (!text) return [];
-    let id = startId || Date.now();
-    const events = [];
-    const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
-    for (const line of lines) {
-      if (/^(EXISTING|ALREADY|KEY EVENTS|UPCOMING|OUTPUT|FORMAT|RULES|STRICT|NOTE)/i.test(line)) continue;
-      const clean = line.replace(/^[-•*]\s*/, '');
-      const m = clean.match(/^\[([^\]]+)\]\s+(.+)$/);
-      if (m) {
-        events.push({ id: id++, date: m[1].trim(), text: m[2].trim() });
-      } else if (clean.length > 3 && !clean.startsWith('#')) {
-        events.push({ id: id++, date: '', text: clean });
-      }
-    }
-    return events;
-  }
-
-  async function scanKeyEvents(depth) {
+  function buildRulesPrompt() {
     const s = getSettings();
-    const chatCtx  = getChatContext(depth);
-    const loreCtx  = getLorebook();
-    const existing = s.keyEvents.map(e => `[${e.date || '?'}] ${e.text}`).join('\n');
-
-    const sys = `You are a precise chronicle archivist for a roleplay story. Extract KEY EVENTS that have ALREADY HAPPENED.
-
-OUTPUT FORMAT — one event per line, exactly like this:
-[DATE] Very brief description (max 8 words)
-
-STRICT RULES:
-- Only past/completed events
-- Use the story world's own calendar dates (not real dates)
-- Be extremely concise — this is a timeline reminder only
-- Preserve ALL existing events listed below, only ADD new ones or correct wrong dates
-- No headers, no markdown, no commentary — ONLY the event lines
-
-${existing ? `EXISTING EVENTS TO PRESERVE:\n${existing}` : 'No existing events yet.'}`;
-
-    const usr = `RECENT CHAT (last ${depth} messages):\n${chatCtx || '(empty)'}${loreCtx ? `\n\nLOREBOOK:\n${loreCtx.slice(0, 3000)}` : ''}\n\nList all key past events:`;
-    const result = await aiGenerate(usr, sys);
-    return parseEventList(result, s.nextEventId);
+    if (!s.injectPhonetic || !s.rules) return '';
+    return `[PHONETIC LAW — ${s.langName.toUpperCase()}]\n${s.rules}`;
   }
 
-  async function scanDeadlines(depth) {
+  function buildGrammarPrompt() {
     const s = getSettings();
-    const chatCtx  = getChatContext(depth);
-    const loreCtx  = getLorebook();
-    const existing = s.deadlines.map(e => `[${e.date || '?'}] ${e.text}`).join('\n');
-    const past     = s.keyEvents.map(e => `[${e.date || '?'}] ${e.text}`).join('\n');
-
-    const sys = `You are a precise timeline analyst for a roleplay story. Extract UPCOMING/FUTURE EVENTS — things planned, expected, or mentioned as yet-to-happen.
-
-OUTPUT FORMAT — one event per line, exactly like this:
-[DATE] Very brief description (max 8 words)
-
-STRICT RULES:
-- Only FUTURE events that haven't happened yet
-- Use the story world's own calendar dates
-- Be extremely concise
-- Preserve ALL existing deadlines below, only ADD new ones
-- Do NOT repeat events that already happened (see past events list)
-- No headers, no markdown — ONLY the event lines
-
-${existing ? `EXISTING DEADLINES TO PRESERVE:\n${existing}` : 'No existing deadlines yet.'}
-${past ? `ALREADY HAPPENED (do NOT include these):\n${past}` : ''}`;
-
-    const usr = `RECENT CHAT (last ${depth} messages):\n${chatCtx || '(empty)'}${loreCtx ? `\n\nLOREBOOK:\n${loreCtx.slice(0, 3000)}` : ''}\n\nList all upcoming/planned events:`;
-    const result = await aiGenerate(usr, sys);
-    return parseEventList(result, s.nextDeadlineId);
+    if (!s.injectGrammar || !s.grammarRules) return '';
+    return `[GRAMMAR — ${s.langName.toUpperCase()}]\n${s.grammarRules}`;
   }
 
-  // ─── Toast ────────────────────────────────────────────────────────────────
+  /* ═══════════════════════════════════════════════════════════════════════════
+     §12  INJECTION & STATUS
+     ═══════════════════════════════════════════════════════════════════════════ */
 
-  let _toastTimer = null;
-  function toast(msg, color, undoFn) {
-    color = color || '#34d399';
-    clearTimeout(_toastTimer);
-    $('.calt-toast').remove();
-    const undoBtn = undoFn ? `<button class="calt-toast-undo">↩ Отменить</button>` : '';
-    $('body').append(`
-      <div class="calt-toast">
-        <div class="calt-toast-row">
-          <span class="calt-toast-dot" style="background:${color}"></span>
-          <span class="calt-toast-msg">${msg}</span>
-          ${undoBtn}
-        </div>
-      </div>`);
-    const $t = $('.calt-toast');
-    setTimeout(() => $t.addClass('calt-in'), 10);
-    if (undoFn) $t.find('.calt-toast-undo').on('click', () => { undoFn(); $t.remove(); });
-    _toastTimer = setTimeout(() => { $t.addClass('calt-out'); setTimeout(() => $t.remove(), 300); }, 4500);
-  }
-
-  // ─── Settings panel ───────────────────────────────────────────────────────
-
-  function getActiveProfileName() {
-    try {
-      const c = ctx();
-      return c.connectionManager?.selectedProfile?.name
-          || c.currentConnectionProfile?.name
-          || c.activeProfile?.name
-          || c.mainApi
-          || c.apiType
-          || null;
-    } catch { return null; }
-  }
-
-  function mountSettingsUi() {
-    if ($('#calt_block').length) return;
-
-    const profileName = getActiveProfileName();
-    const connLabel   = profileName || 'Активный профиль ST';
-    const connColor   = profileName ? '#34d399' : '#fbbf24';
-
-    const $ext = $('#extensions_settings2, #extensions_settings').first();
-    if (!$ext.length) return;
-
-    $ext.append(`
-      <div class="calt-block" id="calt_block">
-        <div class="calt-hdr" id="calt_hdr">
-          <span class="calt-gem">🗓</span>
-          <span class="calt-title">Calendar Tracker</span>
-          <span class="calt-badge" id="calt_badge" style="display:none">0</span>
-          <span class="calt-chev" id="calt_chev">▾</span>
-        </div>
-        <div class="calt-body" id="calt_body">
-          <div class="calt-meta" id="calt_meta">нет данных</div>
-
-          <label class="calt-ck" style="margin-top:8px;display:flex;align-items:center;gap:6px;cursor:pointer;font-size:12px;color:#94a3b8">
-            <input type="checkbox" id="calt_enabled" style="accent-color:#fbbf24">
-            <span>Включено (инжект в промпт)</span>
-          </label>
-
-          <label class="calt-ck" style="margin-top:5px;display:flex;align-items:center;gap:6px;cursor:pointer;font-size:12px;color:#94a3b8">
-            <input type="checkbox" id="calt_autoscan" style="accent-color:#fbbf24">
-            <span>Авто-сканирование</span>
-          </label>
-
-          <div class="calt-field-row">
-            <span class="calt-flabel">Текущая дата</span>
-            <input class="calt-text-input" id="calt_current_date" placeholder="напр. 5 Jan 301 O.F.">
-          </div>
-
-          <button class="menu_button calt-open-btn" id="calt_open_btn">📖 Открыть календарь</button>
-
-          <div class="calt-sec">
-            <div class="calt-sec-hdr" id="calt_conn_hdr">
-              <span class="calt-sec-chev" id="calt_conn_chev">▸</span>
-              <span>🔌 Подключение</span>
-            </div>
-            <div class="calt-sec-body" id="calt_conn_body" style="display:none">
-              <div class="calt-conn-status">
-                <span class="calt-conn-dot" id="calt_conn_dot" style="color:${connColor}">●</span>
-                <span class="calt-conn-label" id="calt_conn_label">${connLabel}</span>
-              </div>
-              <p class="calt-conn-hint">Расширение использует активный Connection Profile из ST. Ничего настраивать не нужно.</p>
-              <button class="menu_button calt-test-btn" id="calt_test_btn">⚡ Тест подключения</button>
-              <div class="calt-api-status" id="calt_test_status"></div>
-            </div>
-          </div>
-        </div>
-      </div>`);
-
+  function _doUpdatePrompt() {
+    const { setExtensionPrompt } = ctx();
     const s = getSettings();
-    $('#calt_enabled').prop('checked', s.enabled !== false);
-    $('#calt_autoscan').prop('checked', !!s.autoScan);
-    $('#calt_current_date').val(s.currentDate || '');
-    updateBadge();
-    updateMeta();
 
-    // Header toggle
-    $('#calt_hdr').on('click', () => {
-      const $b = $('#calt_body');
-      $b.slideToggle(180);
-      $('#calt_chev').text($b.is(':visible') ? '▾' : '▸');
-    });
-
-    // Connection section toggle
-    $('#calt_conn_hdr').on('click', () => {
-      const $b = $('#calt_conn_body');
-      $b.slideToggle(150);
-      $('#calt_conn_chev').text($b.is(':visible') ? '▾' : '▸');
-      const name = getActiveProfileName();
-      $('#calt_conn_label').text(name || 'Активный профиль ST');
-      $('#calt_conn_dot').css('color', name ? '#34d399' : '#fbbf24');
-    });
-
-    // Controls
-    $('#calt_enabled').on('change', function () {
-      getSettings().enabled = this.checked; save(); updatePrompt();
-    });
-    $('#calt_autoscan').on('change', function () {
-      getSettings().autoScan = this.checked; save();
-    });
-
-    let _db = {};
-    const deb = (k, fn) => { clearTimeout(_db[k]); _db[k] = setTimeout(fn, 420); };
-
-    $('#calt_current_date').on('input', function () {
-      const val = this.value;
-      deb('cd', async () => {
-        getSettings().currentDate = val.trim();
-        $('#calt_modal_date').val(val.trim());
-        save(); updateMeta(); await updatePrompt();
-      });
-    });
-
-    $('#calt_test_btn').on('click', async () => {
-      const $s = $('#calt_test_status');
-      $s.css('color', '#7a8499').text('Тестирую…');
-      try {
-        const res = await aiGenerate('Reply with exactly one word: OK', 'You are a test. Reply with exactly one word: OK');
-        $s.css('color', '#34d399').text('✅ ' + res.trim().slice(0, 50));
-      } catch (e) {
-        $s.css('color', '#f87171').text('✗ ' + e.message);
-      }
-    });
-
-    $('#calt_open_btn').on('click', openModal);
-  }
-
-  function updateBadge() {
-    const s = getSettings();
-    const n = s.keyEvents.length + s.deadlines.length;
-    const $b = $('#calt_badge');
-    $b.text(n);
-    if (n > 0) $b.show(); else $b.hide();
-  }
-
-  function updateMeta() {
-    const s = getSettings();
-    const parts = [];
-    if (s.keyEvents.length)  parts.push(s.keyEvents.length + ' событий');
-    if (s.deadlines.length)  parts.push(s.deadlines.length + ' дедлайнов');
-    if (s.currentDate)       parts.push(s.currentDate);
-    $('#calt_meta').text(parts.join(' · ') || 'нет данных');
-    updateBadge();
-  }
-
-  // ─── Modal ────────────────────────────────────────────────────────────────
-
-  function openModal() {
-    if ($('#calt_modal').length) {
-      $('#calt_modal').addClass('calt-mopen');
-      renderTabContent();
+    if (!s.enabled || !charMatch()) {
+      setExtensionPrompt(PROMPT_TAG,  '', EXT_PROMPT_TYPES.IN_CHAT, 0, true);
+      setExtensionPrompt(RULES_TAG,   '', EXT_PROMPT_TYPES.IN_CHAT, 0, true);
+      setExtensionPrompt(GRAMMAR_TAG, '', EXT_PROMPT_TYPES.IN_CHAT, 0, true);
+      updateStatusIndicator(false, []);
       return;
     }
 
-    $('body').append(`
-      <div class="calt-modal" id="calt_modal">
-        <div class="calt-modal-inner">
-          <div class="calt-drag-handle"></div>
-          <div class="calt-modal-hdr">
-            <span class="calt-modal-icon">🗓</span>
-            <span class="calt-modal-title">Calendar Tracker</span>
-            <div class="calt-modal-date-wrap">
-              <span class="calt-modal-date-label">Текущая дата:</span>
-              <input class="calt-modal-date-inp" id="calt_modal_date" placeholder="напр. 5 Jan 301 O.F.">
-            </div>
-            <button class="calt-modal-x" id="calt_modal_close">✕</button>
-          </div>
-          <div class="calt-tabs" id="calt_tabs">
-            <button class="calt-tab active" data-tab="events">⚔ Key Events</button>
-            <button class="calt-tab" data-tab="deadlines">⏳ Deadlines</button>
-            <button class="calt-tab" data-tab="rules">📜 Правила</button>
-          </div>
-          <div class="calt-tab-body" id="calt_tab_body"></div>
-          <div class="calt-modal-footer">
-            <button class="menu_button calt-foot-btn" id="calt_export_btn">💾 Экспорт</button>
-            <button class="menu_button calt-foot-btn" id="calt_import_btn">📥 Импорт</button>
-            <button class="menu_button calt-foot-btn calt-foot-close" id="calt_modal_close2">Закрыть</button>
-          </div>
+    const mainPrompt    = buildMainPrompt(false);
+    const rulesPrompt   = buildRulesPrompt();
+    const grammarPrompt = buildGrammarPrompt();
+
+    // Main prompt: inject at user-configured position
+    setExtensionPrompt(PROMPT_TAG, mainPrompt, s.injectionType, s.injectionDepth, true);
+
+    // Rules & grammar: separate or embedded
+    if (s.separateRules) {
+      const rulesDepth = Math.min(s.rulesDepth, 15);
+      setExtensionPrompt(RULES_TAG,   rulesPrompt,   EXT_PROMPT_TYPES.IN_CHAT, rulesDepth, true);
+      setExtensionPrompt(GRAMMAR_TAG, grammarPrompt,  EXT_PROMPT_TYPES.IN_CHAT, rulesDepth + 1, true);
+    } else {
+      // Embed rules in main prompt — clear separate injections
+      setExtensionPrompt(RULES_TAG,   '', EXT_PROMPT_TYPES.IN_CHAT, 0, true);
+      setExtensionPrompt(GRAMMAR_TAG, '', EXT_PROMPT_TYPES.IN_CHAT, 0, true);
+    }
+
+    const injWords = s.dict.filter(w => _lastInjected.includes(w.id));
+    updateStatusIndicator(true, injWords);
+
+    // Update token display
+    const totalTokens = estimateTokens(mainPrompt) + estimateTokens(rulesPrompt) + estimateTokens(grammarPrompt);
+    updateTokenDisplay(totalTokens, s.tokenBudget);
+
+    if ($('#ct_tracker').hasClass('ct-open')) _renderLastInjectedBanner(injWords);
+  }
+
+  /** Debounced updatePrompt — prevents race conditions from multiple events */
+  function updatePrompt() {
+    clearTimeout(_updatePromptTimer);
+    _updatePromptTimer = setTimeout(_doUpdatePrompt, 80);
+  }
+
+  function updateStatusIndicator(active, injWords) {
+    const $badge = $('#ct_status_badge');
+    if (!$badge.length) return;
+
+    if (active) {
+      const name = ctx().name2 || getSettings().chars[0] || '—';
+      const n    = (injWords || []).length;
+      const cats = getCategories(getSettings());
+      const catCounts = {};
+      (injWords || []).forEach(w => { catCounts[w.cat] = (catCounts[w.cat] || 0) + 1; });
+      const top = Object.entries(catCounts).sort((a, b) => b[1] - a[1])[0];
+      const reg = top ? (cats[top[0]]?.label || top[0]) : '';
+      $badge.css({ background:'rgba(52,211,153,0.12)', color:'#34d399', borderColor:'rgba(52,211,153,0.25)' })
+        .text(`◈ ${esc(name)} · ${n}w${reg ? ' · ' + reg : ''}`);
+    } else {
+      $badge.css({ background:'rgba(100,116,139,0.1)', color:'#475569', borderColor:'rgba(100,116,139,0.15)' })
+        .text('✕ inactive');
+    }
+  }
+
+  function updateTokenDisplay(current, budget) {
+    const $el = $('#ct_token_display');
+    if (!$el.length) return;
+    const pct = budget > 0 ? (current / budget) : 0;
+    const color = pct > 1 ? '#f87171' : pct > 0.8 ? '#fbbf24' : '#34d399';
+    $el.css('color', color).text(`~${current}/${budget} tokens`);
+  }
+
+  function _renderLastInjectedBanner(injWords) {
+    const $el = $('#ct_last_injected');
+    if (!$el.length) return;
+    if (!injWords || !injWords.length) { $el.hide(); return; }
+    const cats = getCategories(getSettings());
+    const html = injWords.map(w => {
+      const c = cats[w.cat] || cats.other;
+      return `<span class="ct-inj-word" style="color:${esc(c.color)}">${esc(w.word)}</span>`;
+    }).join('');
+    $el.html(`<span class="ct-inj-lbl">↑ injected:</span> ${html}`).show();
+  }
+
+
+  /* ═══════════════════════════════════════════════════════════════════════════
+     §13  WORD MARKER PARSING & CAPTURE
+     ═══════════════════════════════════════════════════════════════════════════ */
+
+  /**
+   * Robust parser: [CT_WORD: Word | Definition... | category | character]
+   * Handles | in definitions by fixing first and last two pipe-segments.
+   */
+  function parseWordMarker(raw) {
+    const inner = raw.replace(/^\[CT_WORD:\s*/i, '').replace(/\]$/, '').trim();
+    const parts = inner.split('|').map(p => p.trim());
+    if (parts.length < 3) return null;
+
+    const word = parts[0];
+    const chr  = parts[parts.length - 1];
+    const cat  = parts[parts.length - 2].toLowerCase();
+    // Everything between first and last two parts is the definition
+    const def  = parts.slice(1, parts.length - 2).join('|').trim() || parts[1] || '';
+
+    if (!word || !def) return null;
+    return { word, def, cat, chr };
+  }
+
+  /**
+   * Capture words from model output.
+   * Deduplicates by scanning only the raw text (not text + stripped-HTML copy).
+   */
+  function captureFromMessage(text, forceCapture) {
+    const s = getSettings();
+    if (!forceCapture && (!s.autoCapture || !text)) return;
+    if (!text) return;
+
+    const scanRe     = /\[CT_WORD:([\s\S]*?)\]/gi;
+    const rawMatches = [];
+    let m;
+    while ((m = scanRe.exec(text)) !== null) rawMatches.push('[CT_WORD:' + m[1] + ']');
+    if (!rawMatches.length) return;
+
+    // Deduplicate by word text
+    const seen = new Set();
+    const uniqueMatches = rawMatches.filter(raw => {
+      const p = parseWordMarker(raw);
+      if (!p) return false;
+      const key = p.word.toLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+    if (!uniqueMatches.length) return;
+
+    const capturedIds = [];
+    let any = false;
+    const cats = getCategories(s);
+
+    for (const raw of uniqueMatches) {
+      const parsed = parseWordMarker(raw);
+      if (!parsed) continue;
+      const { word, def, cat, chr } = parsed;
+      const vc = cats[cat] ? cat : 'other';
+      const existing = s.dict.find(w => w.word.toLowerCase() === word.toLowerCase());
+
+      if (existing) {
+        if (existing.def !== def) {
+          // Track history before updating
+          if (!existing.history) existing.history = [];
+          existing.history.push({ def: existing.def, date: Date.now() });
+          if (existing.history.length > 20) existing.history = existing.history.slice(-20);
+
+          existing.def = def;
+          existing.cat = vc;
+          if (chr && !existing.chars.includes(chr)) existing.chars.push(chr);
+          any = true;
+          queueToast(word, def, vc, true);
+        }
+      } else {
+        const newId = s.nextId++;
+        s.dict.push({
+          id:newId, word, cat:vc, def, chars:chr?[chr]:[], pinned:false, auto:true,
+          uses:0, lastUsed:0, disabled:false, triggers:[], relations:[], history:[],
+          examples:[], createdAt:Date.now(), notes:''
+        });
+        capturedIds.push(newId);
+        _sessionNewIds.add(newId);
+        any = true;
+        queueToast(word, def, vc, false);
+      }
+    }
+
+    if (capturedIds.length) {
+      _undoStack.push(capturedIds);
+      if (_undoStack.length > 10) _undoStack.shift();
+    }
+
+    if (any) {
+      ctx().saveSettingsDebounced();
+      renderDrawer();
+      updateWordCount();
+      _updateUndoBtn();
+    }
+  }
+
+  /**
+   * Capture contextual usage examples when a word appears in chat text.
+   */
+  function captureExamples(text) {
+    if (!text) return;
+    const s = getSettings();
+    const sentences = text.replace(/<[^>]+>/g, ' ').split(/[.!?…]+/).filter(s => s.trim().length > 10);
+
+    s.dict.forEach(w => {
+      if (w.disabled) return;
+      const wLower = w.word.toLowerCase();
+      sentences.forEach(sent => {
+        if (sent.toLowerCase().includes(wLower)) {
+          if (!w.examples) w.examples = [];
+          const trimmed = sent.trim().slice(0, 150);
+          if (!w.examples.includes(trimmed) && w.examples.length < 5) {
+            w.examples.push(trimmed);
+          }
+        }
+      });
+    });
+  }
+
+  function cleanMarkers(text) {
+    if (!text) return text;
+    return text
+      .replace(/<div[^>]*display\s*:\s*none[^>]*>[\s\S]*?<\/div>/gi, '')
+      .replace(/\[CT_WORD:[\s\S]*?\]/gi, '')
+      .trim();
+  }
+
+  /* ═══════════════════════════════════════════════════════════════════════════
+     §14  UNDO STACK
+     ═══════════════════════════════════════════════════════════════════════════ */
+
+  function undoLastCapture() {
+    if (!_undoStack.length) return;
+    const ids = _undoStack.pop();
+    const s = getSettings();
+    s.dict = s.dict.filter(w => !ids.includes(w.id));
+    ids.forEach(id => _sessionNewIds.delete(id));
+    ctx().saveSettingsDebounced();
+    renderDrawer();
+    updateWordCount();
+    _updateUndoBtn();
+  }
+
+  function _updateUndoBtn() {
+    const $btn = $('#ct_undo_btn');
+    if (!$btn.length) return;
+    if (_undoStack.length) {
+      const lastCount = _undoStack[_undoStack.length - 1].length;
+      $btn.show().text(`↩ Undo (${lastCount})`).attr('title', `Undo stack: ${_undoStack.length} levels`);
+    } else {
+      $btn.hide();
+    }
+  }
+
+  /* ═══════════════════════════════════════════════════════════════════════════
+     §15  LANGUAGE EVOLUTION ENGINE
+     ═══════════════════════════════════════════════════════════════════════════ */
+
+  /**
+   * Auto-evolve: after every N messages, analyze chat and generate new words.
+   * Runs asynchronously in background, non-blocking.
+   */
+  async function tryEvolve() {
+    const s = getSettings();
+    if (!s.evolutionEnabled || _evolving) return;
+    s.evolutionCounter = (s.evolutionCounter || 0) + 1;
+
+    if (s.evolutionCounter < s.evolutionInterval) return;
+    s.evolutionCounter = 0;
+    ctx().saveSettingsDebounced();
+
+    _evolving = true;
+    try {
+      await evolveLanguage();
+    } catch (e) {
+      console.warn('[CT] Evolution failed:', e.message);
+    } finally {
+      _evolving = false;
+    }
+  }
+
+  async function evolveLanguage() {
+    const s = getSettings();
+    const cats = getCategories(s);
+    const chat = ctx().chat || [];
+    const msgs = chat.filter(m => !m.is_system).slice(-20);
+    if (msgs.length < 5) return;
+
+    const chatText = msgs.map(m =>
+      `[${m.is_user ? 'User' : 'Char'}]: ${cleanMarkers((m.mes || '').replace(/<[^>]+>/g, ' ')).slice(0, 300)}`
+    ).join('\n');
+
+    const existing = s.dict.map(w => `${w.word} [${w.cat}]: ${w.def.slice(0,80)}`).join('\n');
+    const primary  = s.chars[0] || 'the character';
+    const catList  = Object.entries(cats).map(([k, c]) => `${k} (${c.label})`).join(', ');
+
+    let evolvePrompt = `You are the evolution engine for "${s.langName}", a living language.
+
+PHONETIC LAW:
+${s.rules || DEFAULT_RULES}
+
+GRAMMAR:
+${s.grammarRules || DEFAULT_GRAMMAR}
+
+EXISTING VOCABULARY (${s.dict.length} words):
+${existing}
+
+RECENT DIALOGUE (last ${msgs.length} messages):
+${chatText}
+
+TASK — Analyze the emotional landscape of this dialogue. If there are concepts, feelings, or states that the existing vocabulary does NOT cover, forge 1-2 new words.
+
+RULES:
+1. Follow the phonetic law and grammar patterns strictly.
+2. Each new word must fill a genuine gap — do not duplicate existing meanings.
+3. Words must feel organic to this language, not forced.
+4. If the dialogue is emotionally flat or the vocabulary already covers everything — output NOTHING.
+
+OUTPUT FORMAT (only if new words are needed):
+[CT_WORD: Word | Full definition with emotional weight | category | ${primary}]
+Categories: ${catList}
+
+Output ONLY [CT_WORD:...] markers. No explanations. Empty response if nothing to add.`;
+
+    let rulesUpdate = '';
+    if (s.evolutionAutoRules) {
+      evolvePrompt += `\n\nADDITIONALLY: If you see patterns in the existing words that suggest a new phonetic or grammar rule, add it after the word markers as:
+[CT_RULE: rule text]
+[CT_GRAMMAR: grammar pattern]
+Maximum one of each. Only if genuinely emerging from the vocabulary.`;
+    }
+
+    const result = await aiGenerate(evolvePrompt,
+      `You are the keeper and evolver of a living constructed language for dark/emotional RP. You generate only structured markers. Never explain. Never converse.`
+    );
+
+    if (!result?.trim()) return;
+
+    // Capture new words
+    captureFromMessage(result, true);
+
+    // Capture rule updates
+    if (s.evolutionAutoRules) {
+      const ruleMatch = result.match(/\[CT_RULE:\s*([\s\S]*?)\]/i);
+      if (ruleMatch && ruleMatch[1].trim()) {
+        s.rules = (s.rules || '') + '\n• ' + ruleMatch[1].trim();
+        ctx().saveSettingsDebounced();
+      }
+      const gramMatch = result.match(/\[CT_GRAMMAR:\s*([\s\S]*?)\]/i);
+      if (gramMatch && gramMatch[1].trim()) {
+        s.grammarRules = (s.grammarRules || '') + '\n• ' + gramMatch[1].trim();
+        ctx().saveSettingsDebounced();
+      }
+    }
+
+    const n = (result.match(/\[CT_WORD:/gi) || []).length;
+    if (n > 0) {
+      console.log(`[CT] Evolution: forged ${n} new word(s)`);
+    }
+  }
+
+  /* ═══════════════════════════════════════════════════════════════════════════
+     §16  RULE GENERATION & MANUAL SCAN
+     ═══════════════════════════════════════════════════════════════════════════ */
+
+  async function generateRules(btnId, areaId, statusId, mode) {
+    mode = mode || 'phonetic';
+    const s    = getSettings();
+    const $btn = $('#' + (btnId || 'ct_gen_rules_btn'));
+    const $area = $('#' + (areaId || 'ct_rules_area'));
+    const $st  = $('#' + (statusId || 'ct_rules_status'));
+
+    $btn.prop('disabled', true).text('⏳ Generating…');
+    $st.css('color', '#7a8499').text('Contacting model…');
+
+    try {
+      const sample = s.dict.slice(0, 25).map(w => `• ${w.word} [${w.cat}]: ${w.def}`).join('\n');
+      const current = mode === 'grammar' ? (s.grammarRules || DEFAULT_GRAMMAR) : (s.rules || DEFAULT_RULES);
+
+      const prompt = mode === 'grammar'
+        ? `Existing grammar patterns:\n${current}\n\nExisting words:\n${sample}\n\nAnalyze morphological patterns. Add 2–3 new grammar rules that emerge logically from the word structure. Keep all old rules. Return the full updated grammar text — concise, same style.`
+        : `Existing phonetic rules:\n${current}\n\nExisting words:\n${sample}\n\nAnalyze phonetic patterns. Add 2–3 new phonetic rules that emerge logically from the words. Keep all old rules. Return the full updated rule text — concise, same style.`;
+
+      const result = await aiGenerate(prompt,
+        `You create ${mode} rules for a fictional language used in RP. Reply with rule text only — no preamble, no markdown.`
+      );
+      $area.val(result.trim());
+      if (mode === 'grammar') s.grammarRules = result.trim();
+      else s.rules = result.trim();
+      ctx().saveSettingsDebounced();
+      updatePrompt();
+      $st.css('color', '#34d399').text('✓ Rules updated');
+    } catch (e) {
+      $st.css('color', '#f87171').text('✗ ' + e.message);
+    } finally {
+      $btn.prop('disabled', false).text('✦ Generate');
+    }
+  }
+
+  async function manualScan() {
+    const s    = getSettings();
+    const cats = getCategories(s);
+    const $btn = $('#ct_scan_btn'), $st = $('#ct_scan_status');
+    const depth = Math.max(1, parseInt($('#ct_manual_scan_depth').val(), 10) || 20);
+
+    $btn.prop('disabled', true).text('⏳ Scanning…');
+    $st.css('color', '#7a8499').text('Analyzing chat…');
+
+    try {
+      const chat = ctx().chat || [];
+      const msgs = chat.filter(m => !m.is_system).slice(-depth);
+      if (!msgs.length) throw new Error('No messages to scan');
+
+      const chatText = msgs.map(m =>
+        `[${m.is_user ? 'User' : 'Char'}]: ${cleanMarkers((m.mes || '').replace(/<[^>]+>/g, ' ')).slice(0, 400)}`
+      ).join('\n');
+      const existing = s.dict.map(w => `${w.word} (${w.cat})`).join(', ');
+      const primary  = s.chars[0] || 'the character';
+      const catList  = Object.entries(cats).map(([k, c]) => `${k} (${c.label})`).join(', ');
+
+      const result = await aiGenerate(
+        `Phonetic rules:\n${s.rules || DEFAULT_RULES}\n\nGrammar:\n${s.grammarRules || DEFAULT_GRAMMAR}\n\nExisting words:\n${existing || 'none'}\n\nDialogue (last ${depth} messages):\n${chatText}\n\nOutput 1–4 markers. Format exactly:\n[CT_WORD: Word | Definition and emotional weight | category | ${primary}]\nCategories: ${catList}\nCreate words strictly following phonetic law and grammar patterns.`,
+        `You are the keeper of the language "${s.langName}" for RP. Analyze dialogue and output [CT_WORD:...] markers only. No text, no explanations. Empty response if nothing to add.`
+      );
+
+      captureFromMessage(result, true);
+      const n = (result.match(/\[CT_WORD:/gi) || []).length;
+      $st.css('color', n ? '#34d399' : '#7a8499').text(n ? `✓ Forged: ${n}` : 'Nothing new found');
+    } catch (e) {
+      $st.css('color', '#f87171').text('✗ ' + e.message);
+    } finally {
+      $btn.prop('disabled', false).text('🔍 Scan chat');
+    }
+  }
+
+  /* ═══════════════════════════════════════════════════════════════════════════
+     §17  TOAST SYSTEM (stacking queue)
+     ═══════════════════════════════════════════════════════════════════════════ */
+
+  const MAX_VISIBLE_TOASTS = 3;
+
+  function queueToast(word, def, cat, isUpdate) {
+    _toastQueue.push({ word, def, cat, isUpdate });
+    _processToastQueue();
+  }
+
+  function _processToastQueue() {
+    while (_toastQueue.length && _toastActive < MAX_VISIBLE_TOASTS) {
+      const item = _toastQueue.shift();
+      _showToast(item.word, item.def, item.cat, item.isUpdate);
+    }
+  }
+
+  function _showToast(word, def, cat, isUpdate) {
+    const cats = getCategories(getSettings());
+    const c = cats[cat] || cats.other;
+    const offset = _toastActive * 68;
+    _toastActive++;
+
+    const el = $(`
+      <div class="ct-toast" style="bottom:${24 + offset}px">
+        <div class="ct-toast-row">
+          <span class="ct-toast-dot" style="background:${esc(c.color)}"></span>
+          <span class="ct-toast-word">${esc(word)}</span>
+          <span class="ct-toast-badge${isUpdate ? ' ct-toast-upd' : ''}">${isUpdate ? 'updated' : 'forged'}</span>
         </div>
+        <div class="ct-toast-def">${esc(def.slice(0, 90))}${def.length > 90 ? '…' : ''}</div>
       </div>`);
+    $('body').append(el);
+    requestAnimationFrame(() => requestAnimationFrame(() => el.addClass('ct-in')));
+    setTimeout(() => {
+      el.addClass('ct-out');
+      setTimeout(() => {
+        el.remove();
+        _toastActive = Math.max(0, _toastActive - 1);
+        _processToastQueue();
+      }, 300);
+    }, 4500);
+  }
 
-    $('#calt_modal_date').val(getSettings().currentDate || '');
-    $('#calt_modal').addClass('calt-mopen');
+  /* ═══════════════════════════════════════════════════════════════════════════
+     §18  EXPORT / IMPORT
+     ═══════════════════════════════════════════════════════════════════════════ */
 
-    $('#calt_modal_close, #calt_modal_close2').on('click', () => $('#calt_modal').removeClass('calt-mopen'));
-    $('#calt_modal').on('click', function (e) {
-      if ($(e.target).is('#calt_modal') && window.innerWidth > 600) $('#calt_modal').removeClass('calt-mopen');
-    });
+  function exportDict() {
+    const s = getSettings();
+    const data = {
+      langName:     s.langName,
+      rules:        s.rules,
+      grammarRules: s.grammarRules,
+      categories:   s.categories,
+      dict:         s.dict,
+      version:      '8.0.0',
+    };
+    const a = document.createElement('a');
+    a.href = 'data:application/json;charset=utf-8,' + encodeURIComponent(JSON.stringify(data, null, 2));
+    a.download = `${s.langName.replace(/\s+/g, '_')}_dict.json`;
+    a.click();
+  }
 
-    let _ddb = null;
-    $('#calt_modal_date').on('input', function () {
-      const val = this.value;
-      clearTimeout(_ddb);
-      _ddb = setTimeout(async () => {
-        getSettings().currentDate = val.trim();
-        $('#calt_current_date').val(val.trim());
-        save(); updateMeta(); await updatePrompt();
-      }, 400);
-    });
+  function importDict(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    const r = new FileReader();
+    r.onload = ev => {
+      try {
+        const data = JSON.parse(ev.target.result);
+        const s = getSettings();
+        if (data.langName) s.langName = data.langName;
+        if (data.rules) s.rules = data.rules;
+        if (data.grammarRules) s.grammarRules = data.grammarRules;
+        if (data.categories) {
+          Object.entries(data.categories).forEach(([k, c]) => {
+            if (!s.categories[k]) s.categories[k] = c;
+          });
+        }
+        if (Array.isArray(data.dict)) {
+          data.dict.forEach(w => {
+            if (!s.dict.find(x => x.word.toLowerCase() === w.word.toLowerCase())) {
+              s.dict.push({
+                disabled:false, triggers:[], relations:[], history:[], examples:[],
+                createdAt:Date.now(), notes:'', ...w, id:s.nextId++, auto:false
+              });
+            }
+          });
+        }
+        ctx().saveSettingsDebounced();
+        renderDrawer();
+        updateWordCount();
+      } catch (err) { alert('Import error: ' + err.message); }
+    };
+    r.readAsText(file);
+    e.target.value = '';
+  }
 
-    $('#calt_tabs').on('click', '.calt-tab', function () {
-      $('#calt_tabs .calt-tab').removeClass('active');
+  function updateWordCount() {
+    $('#ct_words_total').text(`/ ${getSettings().dict.length}`);
+  }
+
+
+  /* ═══════════════════════════════════════════════════════════════════════════
+     §19  WORD CRUD
+     ═══════════════════════════════════════════════════════════════════════════ */
+
+  function deleteWord(id) {
+    const s = getSettings(), w = s.dict.find(x => x.id === id);
+    if (!w || !confirm(`Delete "${w.word}"?`)) return;
+    s.dict = s.dict.filter(x => x.id !== id);
+    ctx().saveSettingsDebounced();
+    renderDrawer();
+    updateWordCount();
+  }
+
+  function toggleDisableWord(id) {
+    const s = getSettings(), w = s.dict.find(x => x.id === id);
+    if (!w) return;
+    w.disabled = !w.disabled;
+    ctx().saveSettingsDebounced();
+    renderDrawer();
+    updatePrompt();
+  }
+
+  function bulkDeleteAuto() {
+    const s = getSettings();
+    const count = s.dict.filter(w => w.auto).length;
+    if (!count || !confirm(`Delete all ${count} auto-captured words?`)) return;
+    s.dict = s.dict.filter(w => !w.auto);
+    ctx().saveSettingsDebounced();
+    renderDrawer();
+    updateWordCount();
+  }
+
+  function bulkDeleteCategory(catKey) {
+    const s = getSettings();
+    const cats = getCategories(s);
+    const catLabel = cats[catKey]?.label || catKey;
+    const count = s.dict.filter(w => w.cat === catKey).length;
+    if (!count || !confirm(`Delete all ${count} words in category "${catLabel}"?`)) return;
+    s.dict = s.dict.filter(w => w.cat !== catKey);
+    ctx().saveSettingsDebounced();
+    renderDrawer();
+    updateWordCount();
+  }
+
+  let _editCat = 'other';
+
+  function openEdit(id, prefill, prefillCat) {
+    prefill    = prefill || '';
+    prefillCat = prefillCat || 'other';
+    const s  = getSettings();
+    const cats = getCategories(s);
+    const ex = id ? s.dict.find(w => w.id === id) : null;
+    _editCat = ex ? ex.cat : prefillCat;
+
+    $('#ct_edit_title').text(ex ? 'Edit word' : 'New word');
+    $('#ct_edit_id').val(id || '');
+    $('#ct_edit_word').val(ex ? ex.word : prefill);
+    $('#ct_edit_def').val(ex ? ex.def : '');
+    $('#ct_edit_triggers').val(((ex ? ex.triggers : null) || []).join(', '));
+    $('#ct_edit_chars').val(((ex ? ex.chars : null) || []).join(', '));
+    $('#ct_edit_relations').val(((ex ? ex.relations : null) || []).map(r => `${r.type}:${r.targetId}`).join(', '));
+    $('#ct_edit_notes').val((ex ? ex.notes : '') || '');
+    $('#ct_edit_pinned').prop('checked', ex ? !!ex.pinned : false);
+
+    // Render category buttons dynamically
+    _renderEditCats(cats);
+    $(`#ct_edit_cats .ct-ecat[data-cat="${_editCat}"]`).addClass('active');
+
+    // Show history if available
+    const $history = $('#ct_edit_history');
+    if ($history.length) {
+      if (ex && ex.history && ex.history.length) {
+        $history.html(
+          `<div class="ct-elabel" style="margin-top:10px">History (${ex.history.length})</div>` +
+          ex.history.slice(-5).reverse().map(h =>
+            `<div class="ct-history-item"><span class="ct-history-date">${new Date(h.date).toLocaleDateString()}</span> ${esc(h.def.slice(0,80))}</div>`
+          ).join('')
+        ).show();
+      } else {
+        $history.hide();
+      }
+    }
+
+    // Show examples if available
+    const $examples = $('#ct_edit_examples');
+    if ($examples.length) {
+      if (ex && ex.examples && ex.examples.length) {
+        $examples.html(
+          `<div class="ct-elabel" style="margin-top:10px">Usage examples</div>` +
+          ex.examples.slice(0, 3).map(e =>
+            `<div class="ct-example-item">"${esc(e.slice(0,100))}"</div>`
+          ).join('')
+        ).show();
+      } else {
+        $examples.hide();
+      }
+    }
+
+    $('#ct_edit_modal').addClass('ct-eopen');
+    setTimeout(() => {
+      const el = document.getElementById('ct_edit_word');
+      if (el) el.focus();
+    }, 80);
+  }
+
+  function _renderEditCats(cats) {
+    const $container = $('#ct_edit_cats');
+    $container.html(
+      Object.entries(cats).map(([k, c]) =>
+        `<button class="ct-ecat" data-cat="${esc(k)}" style="--cc:${esc(c.color)}">${esc(c.icon)} ${esc(c.label)}</button>`
+      ).join('')
+    );
+    $container.off('click', '.ct-ecat').on('click', '.ct-ecat', function () {
+      _editCat = this.dataset.cat;
+      $container.find('.ct-ecat').removeClass('active');
       $(this).addClass('active');
-      activeTab = $(this).data('tab');
-      renderTabContent();
+    });
+  }
+
+  function closeEdit() { $('#ct_edit_modal').removeClass('ct-eopen'); }
+
+  function saveEdit() {
+    const s        = getSettings();
+    const word     = $('#ct_edit_word').val().trim();
+    const def      = $('#ct_edit_def').val().trim();
+    const cat      = $('#ct_edit_cats .ct-ecat.active').data('cat') || _editCat;
+    const chars    = $('#ct_edit_chars').val().split(',').map(c => c.trim()).filter(Boolean);
+    const triggers = $('#ct_edit_triggers').val().split(',').map(t => t.trim().toLowerCase()).filter(Boolean);
+    const notes    = $('#ct_edit_notes').val().trim();
+    const pinned   = $('#ct_edit_pinned').is(':checked');
+    const id       = $('#ct_edit_id').val();
+
+    // Parse relations: "root:5, compound:3"
+    const relStr   = ($('#ct_edit_relations').val() || '').trim();
+    const relations = relStr ? relStr.split(',').map(r => {
+      const [type, tid] = r.trim().split(':');
+      return type && tid ? { type: type.trim(), targetId: parseInt(tid) } : null;
+    }).filter(Boolean) : [];
+
+    if (!word) { document.getElementById('ct_edit_word')?.focus(); return; }
+    if (!def)  { document.getElementById('ct_edit_def')?.focus();  return; }
+
+    if (id) {
+      const t = s.dict.find(w => w.id === +id);
+      if (t) {
+        // Track definition change in history
+        if (t.def !== def) {
+          if (!t.history) t.history = [];
+          t.history.push({ def: t.def, date: Date.now() });
+        }
+        Object.assign(t, { word, cat, def, chars, triggers, pinned, notes, relations });
+      }
+    } else {
+      s.dict.push({
+        id:s.nextId++, word, cat, def, chars, triggers, pinned, auto:false,
+        uses:0, lastUsed:0, disabled:false, relations, history:[], examples:[],
+        createdAt:Date.now(), notes
+      });
+    }
+
+    ctx().saveSettingsDebounced();
+    renderDrawer();
+    updateWordCount();
+    closeEdit();
+  }
+
+  /* ═══════════════════════════════════════════════════════════════════════════
+     §20  CATEGORY CRUD
+     ═══════════════════════════════════════════════════════════════════════════ */
+
+  function openCategoryEditor() {
+    const s = getSettings();
+    const cats = getCategories(s);
+    _renderCategoryList(cats);
+    $('#ct_cat_editor').addClass('ct-eopen');
+  }
+
+  function closeCategoryEditor() { $('#ct_cat_editor').removeClass('ct-eopen'); }
+
+  function _renderCategoryList(cats) {
+    const $body = $('#ct_cat_editor_body');
+    $body.html(Object.entries(cats).map(([k, c]) => `
+      <div class="ct-cated-row" data-cat="${esc(k)}">
+        <span class="ct-cated-dot" style="background:${esc(c.color)}"></span>
+        <span class="ct-cated-icon">${esc(c.icon)}</span>
+        <span class="ct-cated-label">${esc(c.label)}</span>
+        <span class="ct-cated-kw">${(c.kw || []).length} kw</span>
+        <button class="ct-cated-edit" data-cat="${esc(k)}" title="Edit">✎</button>
+        ${c.custom || k !== 'other' ? `<button class="ct-cated-del" data-cat="${esc(k)}" title="Delete">✕</button>` : ''}
+      </div>
+    `).join(''));
+
+    $body.find('.ct-cated-edit').off('click').on('click', function (e) {
+      e.stopPropagation();
+      openCategoryEditForm(this.dataset.cat);
+    });
+    $body.find('.ct-cated-del').off('click').on('click', function (e) {
+      e.stopPropagation();
+      deleteCategory(this.dataset.cat);
+    });
+  }
+
+  function openCategoryEditForm(catKey) {
+    const s = getSettings();
+    const cats = getCategories(s);
+    const isNew = !catKey;
+    const c = isNew ? { label:'', icon:'★', color:'#a78bfa', kw:[], custom:true } : cats[catKey];
+    if (!c) return;
+
+    $('#ct_catedit_key').val(catKey || '');
+    $('#ct_catedit_label').val(c.label);
+    $('#ct_catedit_icon').val(c.icon);
+    $('#ct_catedit_color').val(c.color);
+    $('#ct_catedit_kw').val((c.kw || []).join(', '));
+    $('#ct_catedit_title').text(isNew ? 'New category' : `Edit: ${c.label}`);
+    $('#ct_catedit_form').show();
+  }
+
+  function saveCategoryEdit() {
+    const s    = getSettings();
+    const key  = $('#ct_catedit_key').val().trim();
+    const label = $('#ct_catedit_label').val().trim();
+    const icon  = $('#ct_catedit_icon').val().trim() || '◉';
+    const color = $('#ct_catedit_color').val().trim() || '#94a3b8';
+    const kw    = $('#ct_catedit_kw').val().split(',').map(k => k.trim().toLowerCase()).filter(Boolean);
+
+    if (!label) return;
+
+    const catKey = key || label.toLowerCase().replace(/[^a-z0-9_]/g, '_');
+    if (!s.categories) s.categories = structuredClone(DEFAULT_CATEGORIES);
+
+    const existing = s.categories[catKey];
+    s.categories[catKey] = {
+      label, icon, color, kw,
+      custom: existing ? existing.custom : true,
+    };
+
+    ctx().saveSettingsDebounced();
+    _renderCategoryList(getCategories(s));
+    $('#ct_catedit_form').hide();
+    renderDrawer();
+    updatePrompt();
+  }
+
+  function deleteCategory(catKey) {
+    const s = getSettings();
+    const cats = getCategories(s);
+    if (catKey === 'other') return;
+    const label = cats[catKey]?.label || catKey;
+    const wordCount = s.dict.filter(w => w.cat === catKey).length;
+    if (!confirm(`Delete category "${label}"? ${wordCount} words will be moved to "Other".`)) return;
+
+    // Move words to 'other'
+    s.dict.forEach(w => { if (w.cat === catKey) w.cat = 'other'; });
+    delete s.categories[catKey];
+
+    ctx().saveSettingsDebounced();
+    _renderCategoryList(getCategories(s));
+    renderDrawer();
+    updatePrompt();
+  }
+
+
+  /* ═══════════════════════════════════════════════════════════════════════════
+     §21  SETTINGS PANEL UI
+     ═══════════════════════════════════════════════════════════════════════════ */
+
+  function mountSettingsUi() {
+    if ($('#ct_settings_block').length) return;
+    const target = $('#extensions_settings2').length ? '#extensions_settings2' : '#extensions_settings';
+    if (!$(target).length) { console.warn('[CT] settings container not found'); return; }
+
+    const s   = getSettings();
+    const sec = (id, icon, title, content) => `
+      <div class="ct-sec" id="ct_sec_${id}">
+        <div class="ct-sec-hdr"><span class="ct-sec-chev">▸</span><span>${icon} ${title}</span></div>
+        <div class="ct-sec-body" style="display:none">${content}</div>
+      </div>`;
+
+    const secMain = `
+      <div class="ct-2col">
+        <label class="ct-ck"><input type="checkbox" id="ct_enabled" ${s.enabled ? 'checked' : ''}><span>Inject into prompt</span></label>
+        <label class="ct-ck"><input type="checkbox" id="ct_phonetic" ${s.injectPhonetic ? 'checked' : ''}><span>Phonetic rules</span></label>
+      </div>
+      <div class="ct-2col" style="margin-top:5px">
+        <label class="ct-ck"><input type="checkbox" id="ct_grammar_toggle" ${s.injectGrammar ? 'checked' : ''}><span>Grammar rules</span></label>
+        <label class="ct-ck"><input type="checkbox" id="ct_compact" ${s.compactPrompt ? 'checked' : ''}><span>Compact prompt</span></label>
+      </div>
+      <div class="ct-field-row" style="margin-top:8px">
+        <label class="ct-flabel">Language name</label>
+        <input type="text" id="ct_lang_name" class="ct-text-input" value="${esc(s.langName)}">
+      </div>
+      <div class="ct-2col" style="margin-top:8px;gap:6px">
+        <button class="menu_button" id="ct_open_tracker_btn" style="flex:1">◈ Open dictionary</button>
+        <button class="menu_button" id="ct_preview_btn" style="flex:1;font-size:11px">👁 Preview</button>
+      </div>
+      <div id="ct_token_display" class="ct-token-display" style="margin-top:6px;font-size:10px;text-align:right">—</div>`;
+
+    const secChars = `
+      <div class="ct-hint">Language activates only for these characters. Empty = always active.</div>
+      <div id="ct_char_tags" class="ct-char-tags"></div>
+      <div class="ct-2col ct-gap">
+        <input type="text" id="ct_char_add_inp" class="ct-text-input" placeholder="Character name…" style="flex:1">
+        <button class="menu_button" id="ct_char_add_btn" style="flex-shrink:0">+ Add</button>
+      </div>`;
+
+    const secScan = `
+      <div class="ct-2col">
+        <label class="ct-ck"><input type="checkbox" id="ct_autocapture" ${s.autoCapture ? 'checked' : ''}><span>Auto-capture words</span></label>
+        <label class="ct-ck"><input type="checkbox" id="ct_semantic" ${s.semantic ? 'checked' : ''}><span>Semantic selection</span></label>
+      </div>
+      <div class="ct-hint" style="margin-top:5px">Semantic picks words by emotional register. Intense scenes get extra words automatically.</div>
+      <div class="ct-srow ct-slider-row">
+        <label>Scan depth</label>
+        <input type="range" id="ct_scan_depth" min="1" max="20" value="${s.scanDepth}">
+        <span id="ct_scan_depth_val">${s.scanDepth}</span><span class="ct-unit">msg</span>
+      </div>
+      <div class="ct-srow ct-slider-row">
+        <label>Words/scene</label>
+        <input type="range" id="ct_words_per" min="2" max="15" value="${s.wordsPerScene}">
+        <span id="ct_words_per_val">${s.wordsPerScene}</span>
+        <span class="ct-unit" id="ct_words_total">/ ${s.dict.length}</span>
+      </div>
+      <div class="ct-srow ct-slider-row">
+        <label>Token budget</label>
+        <input type="range" id="ct_token_budget" min="200" max="2000" step="50" value="${s.tokenBudget}">
+        <span id="ct_token_budget_val">${s.tokenBudget}</span><span class="ct-unit">tok</span>
+      </div>`;
+
+    const secInject = `
+      <div class="ct-hint"><b>In Chat @ depth 1</b> puts the vocabulary block right before the last message.</div>
+      <div class="ct-field-row" style="margin-top:6px">
+        <label class="ct-flabel">Vocabulary position</label>
+        <select id="ct_inject_type" class="ct-text-input" style="padding:4px 8px">
+          <option value="0" ${s.injectionType === 0 ? 'selected' : ''}>Before System Prompt</option>
+          <option value="1" ${s.injectionType === 1 ? 'selected' : ''}>In Chat (recommended)</option>
+          <option value="2" ${s.injectionType === 2 ? 'selected' : ''}>Author's Note position</option>
+        </select>
+      </div>
+      <div class="ct-srow ct-slider-row" id="ct_depth_row" ${s.injectionType === 0 ? 'style="opacity:.4;pointer-events:none"' : ''}>
+        <label>Depth</label>
+        <input type="range" id="ct_inject_depth" min="0" max="15" value="${s.injectionDepth}">
+        <span id="ct_inject_depth_val">${s.injectionDepth}</span>
+        <span class="ct-unit">from end</span>
+      </div>
+      <div style="margin-top:8px">
+        <label class="ct-ck"><input type="checkbox" id="ct_separate_rules" ${s.separateRules ? 'checked' : ''}><span>Rules as separate injection</span></label>
+      </div>
+      <div class="ct-srow ct-slider-row" id="ct_rules_depth_row" ${!s.separateRules ? 'style="opacity:.4;pointer-events:none"' : ''}>
+        <label>Rules depth</label>
+        <input type="range" id="ct_rules_depth" min="1" max="15" value="${s.rulesDepth}">
+        <span id="ct_rules_depth_val">${s.rulesDepth}</span>
+        <span class="ct-unit">from end</span>
+      </div>
+      <div class="ct-hint" style="margin-top:5px">Separate rules injection places phonetic law + grammar deeper in context, saving attention near the last message for vocabulary.</div>`;
+
+    const secEvolution = `
+      <div class="ct-2col">
+        <label class="ct-ck"><input type="checkbox" id="ct_evo_enabled" ${s.evolutionEnabled ? 'checked' : ''}><span>Auto-evolve language</span></label>
+        <label class="ct-ck"><input type="checkbox" id="ct_evo_rules" ${s.evolutionAutoRules ? 'checked' : ''}><span>Also evolve rules</span></label>
+      </div>
+      <div class="ct-srow ct-slider-row">
+        <label>Every</label>
+        <input type="range" id="ct_evo_interval" min="5" max="50" value="${s.evolutionInterval}">
+        <span id="ct_evo_interval_val">${s.evolutionInterval}</span><span class="ct-unit">messages</span>
+      </div>
+      <div class="ct-hint" style="margin-top:5px">Evolution engine analyzes recent dialogue and forges new words when emotional gaps exist. Counter: ${s.evolutionCounter}/${s.evolutionInterval}</div>
+      <button class="menu_button ct-gap" id="ct_evo_now_btn" style="width:100%;font-size:11px">✦ Evolve now</button>
+      <div id="ct_evo_status" style="font-size:10px;min-height:14px;margin-top:4px"></div>`;
+
+    const secRules = `
+      <div class="ct-hint">Phonetic law and grammar injected with prompts. Edit manually or generate from dictionary.</div>
+      <label class="ct-flabel" style="margin-top:6px">Phonetic rules</label>
+      <textarea id="ct_rules_area" class="ct-rules-edit" rows="6">${esc(s.rules || DEFAULT_RULES)}</textarea>
+      <div class="ct-rules-actions">
+        <button class="menu_button" id="ct_rules_reset_btn" style="font-size:11px;padding:4px 8px">↩ Reset</button>
+        <button class="menu_button ct-gen-btn" id="ct_gen_rules_btn">✦ Generate</button>
+      </div>
+      <div id="ct_rules_status" style="font-size:11px;min-height:15px;margin-top:4px"></div>
+      <label class="ct-flabel" style="margin-top:10px">Grammar patterns</label>
+      <textarea id="ct_grammar_area" class="ct-rules-edit" rows="5">${esc(s.grammarRules || DEFAULT_GRAMMAR)}</textarea>
+      <div class="ct-rules-actions">
+        <button class="menu_button" id="ct_grammar_reset_btn" style="font-size:11px;padding:4px 8px">↩ Reset</button>
+        <button class="menu_button ct-gen-btn" id="ct_gen_grammar_btn">✦ Generate</button>
+      </div>
+      <div id="ct_grammar_status" style="font-size:11px;min-height:15px;margin-top:4px"></div>`;
+
+    const secCategories = `
+      <div class="ct-hint">Manage emotional categories. Default categories can be edited; new ones can be created.</div>
+      <button class="menu_button ct-gap" id="ct_open_cat_editor_btn" style="width:100%;font-size:11px">◈ Manage categories</button>`;
+
+    const hasCustom = !!(s.apiEndpoint || '').trim();
+    const secApi = `
+      <div class="ct-api-mode-bar">
+        <div class="ct-api-mode-label">Generation source</div>
+        <div class="ct-api-btns">
+          <button class="ct-api-btn ${!hasCustom ? 'active' : ''}" data-mode="st">🟢 ST (current)</button>
+          <button class="ct-api-btn ${hasCustom ? 'active' : ''}" data-mode="custom">🔌 Custom API</button>
+        </div>
+      </div>
+      <div id="ct_mode_st" ${hasCustom ? 'style="display:none"' : ''}>
+        <div class="ct-api-info">✅ Uses the model currently connected in SillyTavern.</div>
+      </div>
+      <div id="ct_mode_custom" ${!hasCustom ? 'style="display:none"' : ''}>
+        <div class="ct-hint">Separate API for rule generation, manual scan, and evolution.</div>
+        <div class="ct-hint ct-api-warn" style="color:#fbbf24">⚠ API key is stored in plain text in extension settings. Do not use sensitive keys.</div>
+        <label class="ct-ck ct-gap"><input type="checkbox" id="ct_fallback_st" ${s.fallbackToSt !== false ? 'checked' : ''}><span>Fallback to ST if unreachable</span></label>
+        <input type="text" id="ct_api_endpoint" class="ct-text-input ct-gap" placeholder="https://api.openai.com or http://localhost:1234" value="${esc(s.apiEndpoint || '')}">
+        <div class="ct-2col ct-gap" style="gap:5px">
+          <input type="password" id="ct_api_key" class="ct-text-input" placeholder="API Key (optional)" value="${esc(s.apiKey || '')}" style="flex:1;margin:0">
+          <button class="menu_button" id="ct_api_key_eye" style="padding:4px 8px;flex-shrink:0">👁</button>
+        </div>
+        <input type="text" id="ct_api_model" class="ct-text-input ct-gap" placeholder="Model: gpt-4o-mini, llama3, etc." value="${esc(s.apiModel || '')}">
+        <button class="menu_button ct-gap" id="ct_api_test_btn" style="width:100%;font-size:11px;padding:5px 8px">🔌 Test</button>
+        <div id="ct_api_status" style="font-size:10px;min-height:14px;margin-top:4px"></div>
+      </div>`;
+
+    $(target).append(`
+      <div id="ct_settings_block" class="ct-main-block">
+        <div class="ct-main-hdr" id="ct_main_hdr">
+          <span class="ct-main-gem">◈</span>
+          <span class="ct-main-title" id="ct_main_title">${esc(s.langName)}</span>
+          <span id="ct_status_badge" class="ct-status-badge">✕ inactive</span>
+          <span class="ct-main-chev" id="ct_main_chev">▸</span>
+        </div>
+        <div class="ct-main-body" id="ct_main_body" style="display:none">
+          ${sec('main',   '⚙', 'Basic',          secMain)}
+          ${sec('chars',  '♥', 'Characters',     secChars)}
+          ${sec('scan',   '✦', 'Scan & scoring', secScan)}
+          ${sec('inject', '◈', 'Injection',      secInject)}
+          ${sec('evo',    '⟳', 'Evolution',      secEvolution)}
+          ${sec('rules',  '◇', 'Language rules', secRules)}
+          ${sec('cats',   '◉', 'Categories',     secCategories)}
+          ${sec('api',    '🔌','API',            secApi)}
+        </div>
+      </div>
+    `);
+
+    // ── Accordion ──────────────────────────────────────────────────
+    $('#ct_main_hdr').on('click', function () {
+      const body = $('#ct_main_body'), chev = $('#ct_main_chev');
+      body.slideToggle(180);
+      chev.text(body.is(':visible') ? '▾' : '▸');
+    });
+    $('.ct-sec-hdr').on('click', function () {
+      const body = $(this).next('.ct-sec-body'), chev = $(this).find('.ct-sec-chev');
+      body.slideToggle(150);
+      chev.text(body.is(':visible') ? '▾' : '▸');
     });
 
-    $('#calt_export_btn').on('click', exportData);
-    $('#calt_import_btn').on('click', importData);
+    // ── Basic toggles ──────────────────────────────────────────────
+    $('#ct_enabled').on('change', function () { getSettings().enabled = this.checked; ctx().saveSettingsDebounced(); updatePrompt(); });
+    $('#ct_phonetic').on('change', function () { getSettings().injectPhonetic = this.checked; ctx().saveSettingsDebounced(); updatePrompt(); });
+    $('#ct_grammar_toggle').on('change', function () { getSettings().injectGrammar = this.checked; ctx().saveSettingsDebounced(); updatePrompt(); });
+    $('#ct_compact').on('change', function () { getSettings().compactPrompt = this.checked; ctx().saveSettingsDebounced(); updatePrompt(); });
+    $('#ct_autocapture').on('change', function () { getSettings().autoCapture = this.checked; ctx().saveSettingsDebounced(); });
+    $('#ct_semantic').on('change', function () { getSettings().semantic = this.checked; ctx().saveSettingsDebounced(); });
 
-    renderTabContent();
-  }
+    // ── Debounced text inputs ──────────────────────────────────────
+    let db = {};
+    const deb = (k, fn, t=350) => { clearTimeout(db[k]); db[k] = setTimeout(fn, t); };
 
-  // ─── Tab rendering ────────────────────────────────────────────────────────
-
-  function renderTabContent() {
-    const $b = $('#calt_tab_body');
-    if (!$b.length) return;
-    if      (activeTab === 'events')    $b.html(buildEventsTab());
-    else if (activeTab === 'deadlines') $b.html(buildDeadlinesTab());
-    else if (activeTab === 'rules')     $b.html(buildRulesTab());
-    bindTabEvents();
-  }
-
-  function eventRow(e, type) {
-    const dateBadge = e.date
-      ? '<span class="calt-ev-date">' + esc(e.date) + '</span>'
-      : '<span class="calt-ev-date calt-ev-date-empty">—</span>';
-    return '<div class="calt-ev-row" data-id="' + e.id + '" data-type="' + type + '">'
-      + '<div class="calt-ev-left">' + dateBadge + '<span class="calt-ev-text">' + esc(e.text) + '</span></div>'
-      + '<div class="calt-ev-acts">'
-      + '<button class="calt-ev-btn calt-ev-edit" data-id="' + e.id + '" data-type="' + type + '" title="Редактировать">✎</button>'
-      + '<button class="calt-ev-btn calt-ev-del"  data-id="' + e.id + '" data-type="' + type + '" title="Удалить">✕</button>'
-      + '</div></div>';
-  }
-
-  function buildEventsTab() {
-    const s = getSettings();
-    const listHtml = s.keyEvents.length
-      ? s.keyEvents.map(function(e) { return eventRow(e, 'event'); }).join('')
-      : '<div class="calt-empty">Событий нет.<br><small>Нажмите ✦ Сканировать — AI проанализирует чат и лорбук</small></div>';
-    return '<div class="calt-list-wrap"><div class="calt-list" id="calt_ev_list">' + listHtml + '</div></div>'
-      + '<div class="calt-add-row">'
-      + '<input class="calt-add-date" id="calt_add_ev_date" placeholder="Дата">'
-      + '<input class="calt-add-txt" id="calt_add_ev_txt" placeholder="Описание события...">'
-      + '<button class="calt-add-btn" id="calt_add_ev_btn">+ Добавить</button>'
-      + '</div>'
-      + '<div class="calt-scan-row">'
-      + '<span class="calt-scan-lbl">Сканировать</span>'
-      + '<input type="number" class="calt-depth-inp" id="calt_scan_ev_depth" value="' + getSettings().scanDepth + '" min="5" max="200">'
-      + '<span class="calt-scan-unit">сообщений</span>'
-      + '<button class="menu_button calt-scan-btn" id="calt_scan_ev_btn">✦ Сканировать</button>'
-      + '</div>'
-      + '<div class="calt-scan-status" id="calt_scan_ev_status"></div>';
-  }
-
-  function buildDeadlinesTab() {
-    const s = getSettings();
-    const listHtml = s.deadlines.length
-      ? s.deadlines.map(function(e) { return eventRow(e, 'deadline'); }).join('')
-      : '<div class="calt-empty">Дедлайнов нет.<br><small>Нажмите ✦ Сканировать — AI найдёт грядущие события</small></div>';
-    return '<div class="calt-list-wrap"><div class="calt-list" id="calt_dl_list">' + listHtml + '</div></div>'
-      + '<div class="calt-add-row">'
-      + '<input class="calt-add-date" id="calt_add_dl_date" placeholder="Дата">'
-      + '<input class="calt-add-txt" id="calt_add_dl_txt" placeholder="Грядущее событие...">'
-      + '<button class="calt-add-btn" id="calt_add_dl_btn">+ Добавить</button>'
-      + '</div>'
-      + '<div class="calt-scan-row">'
-      + '<span class="calt-scan-lbl">Сканировать</span>'
-      + '<input type="number" class="calt-depth-inp" id="calt_scan_dl_depth" value="' + getSettings().scanDepth + '" min="5" max="200">'
-      + '<span class="calt-scan-unit">сообщений</span>'
-      + '<button class="menu_button calt-scan-btn" id="calt_scan_dl_btn">✦ Сканировать</button>'
-      + '</div>'
-      + '<div class="calt-scan-status" id="calt_scan_dl_status"></div>';
-  }
-
-  function buildRulesTab() {
-    const s = getSettings();
-    return '<div class="calt-rules-wrap">'
-      + '<p class="calt-rules-hint">Опишите систему летоисчисления: названия месяцев, дней, лунные циклы, сезоны, эпохи. Инжектируется в каждый промпт.</p>'
-      + '<textarea class="calt-rules-edit" id="calt_rules_edit" rows="12" placeholder="Например:&#10;[Calendar: Standard Vaelorian, Year: 1000 A.P.]&#10;[Months: Vael, Eorel, Vorath...]&#10;[Week: 7 days — Aed, Fed, Bled, Sted, Med, Waed, Raed]&#10;[Moon Lyrath: 28-day cycle — YMNIR/AENOR/LYRATH VEL/OSSITH]">'
-      + esc(s.calendarRules || '') + '</textarea>'
-      + '<div class="calt-rules-actions">'
-      + '<button class="menu_button calt-scan-btn" id="calt_rules_extract_btn">✦ Извлечь из лорбука</button>'
-      + '<button class="menu_button calt-rules-save-btn" id="calt_rules_save_btn">💾 Сохранить</button>'
-      + '</div>'
-      + '<div class="calt-scan-status" id="calt_scan_rules_status"></div>'
-      + '</div>';
-  }
-
-  // ─── Tab event bindings ───────────────────────────────────────────────────
-
-  function bindTabEvents() {
-    // Delete
-    $('.calt-ev-del').off('click').on('click', function () {
-      const id = +$(this).data('id'), type = $(this).data('type');
-      const s = getSettings();
-      const arr = type === 'event' ? 'keyEvents' : 'deadlines';
-      const removed = s[arr].find(function(e) { return e.id === id; });
-      s[arr] = s[arr].filter(function(e) { return e.id !== id; });
-      save(); updatePrompt(); updateMeta(); renderTabContent();
-      toast(type === 'event' ? 'Событие удалено' : 'Дедлайн удалён', '#f87171', function() {
-        s[arr].push(removed);
-        s[arr].sort(function(a, b) { return a.id - b.id; });
-        save(); updatePrompt(); updateMeta(); renderTabContent();
+    $('#ct_lang_name').on('input', function () {
+      deb('ln', () => {
+        const v = this.value.trim() || 'Citadel Tongue';
+        getSettings().langName = v;
+        ctx().saveSettingsDebounced();
+        $('#ct_main_title,#ct_tr_title').text(v);
+        updatePrompt();
       });
     });
 
-    // Edit
-    $('.calt-ev-edit').off('click').on('click', function () {
-      openEditModal(+$(this).data('id'), $(this).data('type'));
+    // ── Sliders ────────────────────────────────────────────────────
+    $('#ct_scan_depth').on('input', function () { getSettings().scanDepth = +this.value; $('#ct_scan_depth_val').text(this.value); ctx().saveSettingsDebounced(); });
+    $('#ct_words_per').on('input', function () { getSettings().wordsPerScene = +this.value; $('#ct_words_per_val').text(this.value); ctx().saveSettingsDebounced(); });
+    $('#ct_token_budget').on('input', function () { getSettings().tokenBudget = +this.value; $('#ct_token_budget_val').text(this.value); ctx().saveSettingsDebounced(); });
+
+    // ── Injection ──────────────────────────────────────────────────
+    const typeHints = { '0':'Before system prompt', '1':'★ Right before the last message', '2':"Author's Note position" };
+    $('#ct_inject_type').on('change', function () {
+      const t = +this.value;
+      getSettings().injectionType = t;
+      ctx().saveSettingsDebounced();
+      $('#ct_depth_row').css({ opacity:t===0?.4:1, pointerEvents:t===0?'none':'auto' });
+      updatePrompt();
+    });
+    $('#ct_inject_depth').on('input', function () {
+      getSettings().injectionDepth = +this.value;
+      $('#ct_inject_depth_val').text(this.value);
+      ctx().saveSettingsDebounced();
+      updatePrompt();
+    });
+    $('#ct_separate_rules').on('change', function () {
+      getSettings().separateRules = this.checked;
+      ctx().saveSettingsDebounced();
+      $('#ct_rules_depth_row').css({ opacity:this.checked?1:.4, pointerEvents:this.checked?'auto':'none' });
+      updatePrompt();
+    });
+    $('#ct_rules_depth').on('input', function () {
+      getSettings().rulesDepth = +this.value;
+      $('#ct_rules_depth_val').text(this.value);
+      ctx().saveSettingsDebounced();
+      updatePrompt();
     });
 
-    // Add event
-    $('#calt_add_ev_btn').off('click').on('click', function() {
-      const date = $('#calt_add_ev_date').val().trim();
-      const text = $('#calt_add_ev_txt').val().trim();
-      if (!text) { $('#calt_add_ev_txt').focus(); return; }
+    // ── Evolution ──────────────────────────────────────────────────
+    $('#ct_evo_enabled').on('change', function () { getSettings().evolutionEnabled = this.checked; ctx().saveSettingsDebounced(); });
+    $('#ct_evo_rules').on('change', function () { getSettings().evolutionAutoRules = this.checked; ctx().saveSettingsDebounced(); });
+    $('#ct_evo_interval').on('input', function () {
+      getSettings().evolutionInterval = +this.value;
+      $('#ct_evo_interval_val').text(this.value);
+      ctx().saveSettingsDebounced();
+    });
+    $('#ct_evo_now_btn').on('click', async () => {
+      const $st = $('#ct_evo_status');
+      const $btn = $('#ct_evo_now_btn');
+      $btn.prop('disabled', true).text('⏳ Evolving…');
+      $st.css('color', '#7a8499').text('Analyzing dialogue…');
+      try {
+        await evolveLanguage();
+        $st.css('color', '#34d399').text('✓ Evolution complete');
+      } catch (e) {
+        $st.css('color', '#f87171').text('✗ ' + e.message);
+      } finally {
+        $btn.prop('disabled', false).text('✦ Evolve now');
+      }
+    });
+
+    // ── Rules ──────────────────────────────────────────────────────
+    let rt, gt;
+    $('#ct_rules_area').on('input', function () { clearTimeout(rt); rt = setTimeout(() => { getSettings().rules = this.value; ctx().saveSettingsDebounced(); updatePrompt(); }, 600); });
+    $('#ct_rules_reset_btn').on('click', () => { $('#ct_rules_area').val(DEFAULT_RULES); getSettings().rules = DEFAULT_RULES; ctx().saveSettingsDebounced(); updatePrompt(); });
+    $('#ct_gen_rules_btn').on('click', () => generateRules('ct_gen_rules_btn', 'ct_rules_area', 'ct_rules_status', 'phonetic'));
+
+    $('#ct_grammar_area').on('input', function () { clearTimeout(gt); gt = setTimeout(() => { getSettings().grammarRules = this.value; ctx().saveSettingsDebounced(); updatePrompt(); }, 600); });
+    $('#ct_grammar_reset_btn').on('click', () => { $('#ct_grammar_area').val(DEFAULT_GRAMMAR); getSettings().grammarRules = DEFAULT_GRAMMAR; ctx().saveSettingsDebounced(); updatePrompt(); });
+    $('#ct_gen_grammar_btn').on('click', () => generateRules('ct_gen_grammar_btn', 'ct_grammar_area', 'ct_grammar_status', 'grammar'));
+
+    // ── Categories ─────────────────────────────────────────────────
+    $('#ct_open_cat_editor_btn').on('click', openCategoryEditor);
+
+    // ── Characters ─────────────────────────────────────────────────
+    renderCharTags();
+    $('#ct_char_add_btn').on('click', addChar);
+    $('#ct_char_add_inp').on('keydown', e => { if (e.key === 'Enter') addChar(); });
+
+    // ── Preview ────────────────────────────────────────────────────
+    $('#ct_open_tracker_btn').on('click', () => { $('#ct_tracker').addClass('ct-open'); renderDrawer(); });
+    $('#ct_preview_btn').on('click', () => {
+      const main = buildMainPrompt(true);
+      const rules = buildRulesPrompt();
+      const grammar = buildGrammarPrompt();
+      const total = [main, rules, grammar].filter(Boolean).join('\n\n──────────────────\n\n');
+      const tokens = estimateTokens(total);
+      $('#ct_preview_text').text(total || '[Prompt is empty]');
+      $('#ct_preview_tokens').text(`~${tokens} tokens`);
+      $('#ct_preview_modal').addClass('ct-eopen');
+    });
+
+    // ── API ────────────────────────────────────────────────────────
+    $('.ct-api-btn').on('click', function () {
+      const mode = this.dataset.mode;
+      $('.ct-api-btn').removeClass('active');
+      $(this).addClass('active');
+      if (mode === 'st') {
+        $('#ct_mode_st').show(); $('#ct_mode_custom').hide();
+        getSettings().apiEndpoint = ''; $('#ct_api_endpoint').val('');
+        ctx().saveSettingsDebounced(); _workingApi = null;
+      } else {
+        $('#ct_mode_st').hide(); $('#ct_mode_custom').show();
+      }
+    });
+    $('#ct_api_endpoint').on('input', function () { deb('ep', () => { getSettings().apiEndpoint = this.value.trim(); ctx().saveSettingsDebounced(); _workingApi = null; }); });
+    $('#ct_api_key').on('input', function () { deb('ak', () => { getSettings().apiKey = this.value; ctx().saveSettingsDebounced(); }); });
+    $('#ct_api_model').on('input', function () { deb('am', () => { getSettings().apiModel = this.value.trim(); ctx().saveSettingsDebounced(); _workingApi = null; }); });
+    $('#ct_fallback_st').on('change', function () { getSettings().fallbackToSt = this.checked; ctx().saveSettingsDebounced(); });
+    $('#ct_api_key_eye').on('click', function () { const f = $('#ct_api_key'); f.attr('type', f.attr('type') === 'password' ? 'text' : 'password'); });
+    $('#ct_api_test_btn').on('click', async () => {
+      const $st = $('#ct_api_status');
+      $st.css('color', '#7a8499').text('Testing…');
+      try {
+        const r = await aiGenerate('Say only: OK', 'Reply with exactly one word: OK');
+        $st.css('color', '#34d399').text(`✅ "${r.trim().slice(0, 40)}"`);
+      } catch (e) {
+        $st.css('color', '#f87171').text('✗ ' + e.message);
+      }
+    });
+  }
+
+
+  /* ═══════════════════════════════════════════════════════════════════════════
+     §22  CHARACTER TAGS
+     ═══════════════════════════════════════════════════════════════════════════ */
+
+  function renderCharTags() {
+    const s = getSettings(), el = $('#ct_char_tags');
+    el.empty();
+    (s.chars || []).forEach(c => {
+      el.append(`<span class="ct-char-tag">${esc(c)}<button class="ct-tag-x" data-c="${esc(c)}">✕</button></span>`);
+    });
+    el.find('.ct-tag-x').on('click', function () {
       const s = getSettings();
-      s.keyEvents.push({ id: s.nextEventId++, date: date, text: text });
-      save(); updatePrompt(); updateMeta();
-      $('#calt_add_ev_date').val(''); $('#calt_add_ev_txt').val('');
-      renderTabContent();
+      s.chars = s.chars.filter(x => x !== this.dataset.c);
+      ctx().saveSettingsDebounced(); renderCharTags(); updatePrompt();
     });
-    $('#calt_add_ev_txt').off('keydown').on('keydown', function(e) { if (e.key === 'Enter') $('#calt_add_ev_btn').click(); });
+  }
 
-    // Add deadline
-    $('#calt_add_dl_btn').off('click').on('click', function() {
-      const date = $('#calt_add_dl_date').val().trim();
-      const text = $('#calt_add_dl_txt').val().trim();
-      if (!text) { $('#calt_add_dl_txt').focus(); return; }
+  function addChar() {
+    const v = $('#ct_char_add_inp').val().trim();
+    if (!v) return;
+    const s = getSettings();
+    if (!s.chars.includes(v)) {
+      s.chars.push(v);
+      ctx().saveSettingsDebounced(); renderCharTags(); updatePrompt();
+    }
+    $('#ct_char_add_inp').val('');
+  }
+
+  /* ═══════════════════════════════════════════════════════════════════════════
+     §23  TRACKER POPUP — HTML SKELETON
+     ═══════════════════════════════════════════════════════════════════════════ */
+
+  function ensureTracker() {
+    if ($('#ct_tracker').length) return;
+    const s = getSettings();
+    const cats = getCategories(s);
+
+    $('body').append(`
+      <div id="ct_tracker" class="ct-tracker">
+        <div class="ct-tracker-inner">
+          <div class="ct-tr-header">
+            <div class="ct-tr-title-wrap">
+              <span class="ct-tr-glow"></span>
+              <span id="ct_tr_title" class="ct-tr-title">${esc(s.langName)}</span>
+            </div>
+            <div id="ct_tr_meta" class="ct-tr-meta"></div>
+            <button id="ct_tr_close" class="ct-tr-close">✕</button>
+          </div>
+          <div class="ct-tr-search-wrap">
+            <input type="text" id="ct_tr_search" class="ct-tr-search" placeholder="Search word or definition…" value="${esc(trackerSearch)}">
+          </div>
+          <div class="ct-tr-toolbar">
+            <div class="ct-tr-tabs">
+              <button class="ct-tr-tab ${trackerTab==='words'?'active':''}" data-tab="words">Words</button>
+              <button class="ct-tr-tab ${trackerTab==='rules'?'active':''}" data-tab="rules">Rules</button>
+              <button class="ct-tr-tab ${trackerTab==='stats'?'active':''}" data-tab="stats">Stats</button>
+            </div>
+            <select id="ct_tr_sort" class="ct-tr-sort" title="Sort order">
+              <option value="alpha"  ${trackerSort==='alpha' ?'selected':''}>A–Z</option>
+              <option value="score"  ${trackerSort==='score' ?'selected':''}>By scene</option>
+              <option value="uses"   ${trackerSort==='uses'  ?'selected':''}>By uses</option>
+              <option value="recent" ${trackerSort==='recent'?'selected':''}>Recent</option>
+            </select>
+          </div>
+          <div id="ct_cat_bar" class="ct-cat-bar"></div>
+          <div id="ct_last_injected" class="ct-last-injected" style="display:none"></div>
+          <div id="ct_drawer_body" class="ct-tr-body"></div>
+          <div id="ct_add_row" class="ct-tr-add-row">
+            <input type="text" id="ct_add_input" class="ct-tr-add-input" placeholder="New word…">
+            <div id="ct_add_cats" class="ct-add-cats"></div>
+            <button id="ct_add_btn" class="ct-add-btn">+ Add</button>
+          </div>
+          <div class="ct-scan-row">
+            <label class="ct-scan-label">Scan last</label>
+            <input type="number" id="ct_manual_scan_depth" class="ct-scan-depth-inp" min="1" max="100" value="20">
+            <span class="ct-scan-unit">msg</span>
+            <button class="menu_button ct-scan-btn" id="ct_scan_btn">🔍 Scan chat</button>
+          </div>
+          <div id="ct_scan_status" class="ct-scan-status"></div>
+          <div class="ct-tr-footer">
+            <button class="menu_button ct-foot-btn" id="ct_export_btn">⬇ Export</button>
+            <button class="menu_button ct-foot-btn" id="ct_import_btn">⬆ Import</button>
+            <button class="menu_button ct-foot-btn ct-undo-btn" id="ct_undo_btn" style="display:none">↩ Undo</button>
+            <div class="ct-bulk-drop">
+              <button class="menu_button ct-foot-btn" id="ct_bulk_btn">⋯</button>
+              <div class="ct-bulk-menu" id="ct_bulk_menu" style="display:none">
+                <button class="ct-bulk-item" id="ct_bulk_del_auto">Delete all auto</button>
+                <button class="ct-bulk-item" id="ct_bulk_del_cat">Delete by category…</button>
+              </div>
+            </div>
+            <button class="menu_button ct-foot-btn" id="ct_tr_close2">Close</button>
+          </div>
+        </div>
+      </div>
+
+      <div id="ct_edit_modal" class="ct-edit-overlay">
+        <div class="ct-edit-box">
+          <div class="ct-edit-hdr">
+            <span id="ct_edit_title">Edit word</span>
+            <button id="ct_edit_x">✕</button>
+          </div>
+          <div class="ct-edit-body">
+            <input type="hidden" id="ct_edit_id">
+            <label class="ct-elabel">Word</label>
+            <input type="text" id="ct_edit_word" class="ct-einput" placeholder="Vai'enn">
+            <label class="ct-elabel">Category</label>
+            <div id="ct_edit_cats" class="ct-ecats"></div>
+            <label class="ct-elabel">Definition & emotional weight</label>
+            <textarea id="ct_edit_def" class="ct-etextarea" placeholder="Meaning, resonance, how the character uses this word…"></textarea>
+            <label class="ct-elabel">Resonance triggers <small>(comma-separated — boost score when found)</small></label>
+            <input type="text" id="ct_edit_triggers" class="ct-einput" placeholder="кровь, угроза, blood, kill…">
+            <label class="ct-elabel">Characters <small>(comma-separated, empty = any)</small></label>
+            <input type="text" id="ct_edit_chars" class="ct-einput" placeholder="Gasil">
+            <label class="ct-elabel">Relations <small>(type:wordId — root:5, compound:3)</small></label>
+            <input type="text" id="ct_edit_relations" class="ct-einput" placeholder="root:1, compound:6">
+            <label class="ct-elabel">Notes</label>
+            <input type="text" id="ct_edit_notes" class="ct-einput" placeholder="Personal notes…">
+            <label class="ct-ck-row"><input type="checkbox" id="ct_edit_pinned"> ⚓ Pin — always inject</label>
+            <div id="ct_edit_history"></div>
+            <div id="ct_edit_examples"></div>
+          </div>
+          <div class="ct-edit-footer">
+            <button class="menu_button" id="ct_edit_cancel">Cancel</button>
+            <button class="menu_button ct-save-btn" id="ct_edit_save">Save</button>
+          </div>
+        </div>
+      </div>
+
+      <div id="ct_cat_editor" class="ct-edit-overlay">
+        <div class="ct-edit-box" style="max-width:440px">
+          <div class="ct-edit-hdr">
+            <span>Manage categories</span>
+            <button id="ct_cat_editor_x">✕</button>
+          </div>
+          <div class="ct-edit-body">
+            <div id="ct_cat_editor_body"></div>
+            <button class="menu_button ct-gap" id="ct_cat_add_btn" style="width:100%">+ New category</button>
+            <div id="ct_catedit_form" style="display:none;margin-top:10px;padding:10px;border:1px solid rgba(120,80,200,0.2);border-radius:8px">
+              <div id="ct_catedit_title" class="ct-elabel" style="font-size:12px;color:#c4b5fd;font-weight:700">New category</div>
+              <input type="hidden" id="ct_catedit_key">
+              <label class="ct-elabel">Label</label>
+              <input type="text" id="ct_catedit_label" class="ct-einput" placeholder="Desire">
+              <div class="ct-2col ct-gap" style="gap:6px">
+                <div style="flex:1">
+                  <label class="ct-elabel">Icon</label>
+                  <input type="text" id="ct_catedit_icon" class="ct-einput" placeholder="★" maxlength="2">
+                </div>
+                <div style="flex:1">
+                  <label class="ct-elabel">Color</label>
+                  <input type="color" id="ct_catedit_color" class="ct-einput" value="#a78bfa" style="padding:2px;height:30px">
+                </div>
+              </div>
+              <label class="ct-elabel">Keywords <small>(comma-separated)</small></label>
+              <textarea id="ct_catedit_kw" class="ct-etextarea" rows="3" placeholder="desire, want, need, crave, желание, жажда…"></textarea>
+              <div class="ct-2col ct-gap" style="gap:6px;justify-content:flex-end">
+                <button class="menu_button" id="ct_catedit_cancel">Cancel</button>
+                <button class="menu_button ct-save-btn" id="ct_catedit_save">Save</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div id="ct_preview_modal" class="ct-edit-overlay">
+        <div class="ct-edit-box" style="max-width:600px">
+          <div class="ct-edit-hdr">
+            <span>Injected prompt</span>
+            <span id="ct_preview_tokens" style="font-size:10px;color:#7a8499;margin-left:auto;margin-right:10px"></span>
+            <button id="ct_preview_x">✕</button>
+          </div>
+          <div class="ct-edit-body">
+            <pre id="ct_preview_text" style="font-size:11px;color:#6a7a98;white-space:pre-wrap;word-break:break-word;max-height:60vh;overflow-y:auto;margin:0;font-family:inherit;line-height:1.6"></pre>
+          </div>
+        </div>
+      </div>
+
+      <input type="file" id="ct_import_file" accept=".json" style="display:none">
+    `);
+
+    // ── Tracker event wiring ──────────────────────────────────────
+    $('#ct_tr_close,#ct_tr_close2').on('click', () => $('#ct_tracker').removeClass('ct-open'));
+    $('#ct_tracker').on('click', function (e) { if (e.target === this) $(this).removeClass('ct-open'); });
+
+    $('.ct-tr-tab').on('click', function () {
+      trackerTab = this.dataset.tab;
+      $('.ct-tr-tab').removeClass('active'); $(this).addClass('active');
+      renderDrawer();
+    });
+
+    $('#ct_tr_sort').on('change', function () { trackerSort = this.value; renderWordList(); });
+
+    let dbs = {};
+    $('#ct_tr_search').on('input', function () {
+      trackerSearch = this.value;
+      clearTimeout(dbs.s);
+      dbs.s = setTimeout(renderWordList, 180);
+    });
+
+    // Add word row — render category buttons dynamically
+    _renderAddCats();
+    let addCat = 'other';
+    $(document).on('click', '#ct_add_cats .ct-add-cat', function () {
+      addCat = this.dataset.cat;
+      $('#ct_add_cats .ct-add-cat').removeClass('active');
+      $(this).addClass('active');
+    });
+    $('#ct_add_btn').on('click', () => {
+      const v = $('#ct_add_input').val().trim();
+      if (v) { openEdit(null, v, addCat); $('#ct_add_input').val(''); }
+    });
+    $('#ct_add_input').on('keydown', e => {
+      if (e.key === 'Enter') {
+        const v = e.target.value.trim();
+        if (v) { openEdit(null, v, addCat); e.target.value = ''; }
+      }
+    });
+
+    $('#ct_export_btn').on('click', exportDict);
+    $('#ct_import_btn').on('click', () => $('#ct_import_file').click());
+    $('#ct_import_file').on('change', importDict);
+    $('#ct_scan_btn').on('click', manualScan);
+    $('#ct_undo_btn').on('click', undoLastCapture);
+
+    // Bulk actions
+    $('#ct_bulk_btn').on('click', () => { $('#ct_bulk_menu').toggle(); });
+    $(document).on('click', e => { if (!$(e.target).closest('.ct-bulk-drop').length) $('#ct_bulk_menu').hide(); });
+    $('#ct_bulk_del_auto').on('click', () => { bulkDeleteAuto(); $('#ct_bulk_menu').hide(); });
+    $('#ct_bulk_del_cat').on('click', () => {
       const s = getSettings();
-      s.deadlines.push({ id: s.nextDeadlineId++, date: date, text: text });
-      save(); updatePrompt(); updateMeta();
-      $('#calt_add_dl_date').val(''); $('#calt_add_dl_txt').val('');
-      renderTabContent();
-    });
-    $('#calt_add_dl_txt').off('keydown').on('keydown', function(e) { if (e.key === 'Enter') $('#calt_add_dl_btn').click(); });
-
-    // Depth persist
-    $('#calt_scan_ev_depth, #calt_scan_dl_depth').off('change').on('change', function() {
-      getSettings().scanDepth = +this.value || 20; save();
+      const cats = getCategories(s);
+      const catKeys = Object.entries(cats).filter(([k]) => s.dict.some(w => w.cat === k)).map(([k, c]) => `${k} (${c.label})`);
+      const choice = prompt(`Enter category key to delete all words:\n${catKeys.join('\n')}`);
+      if (choice) { bulkDeleteCategory(choice.split('(')[0].trim()); }
+      $('#ct_bulk_menu').hide();
     });
 
-    // Scan Key Events
-    $('#calt_scan_ev_btn').off('click').on('click', async function () {
-      const $btn = $(this), $st = $('#calt_scan_ev_status');
-      const depth = +$('#calt_scan_ev_depth').val() || 20;
-      $btn.prop('disabled', true).text('Сканирую…');
-      $st.css('color', '#7a8499').text('Анализирую чат и лорбук…');
-      try {
-        const s = getSettings();
-        const snapshot = JSON.stringify(s.keyEvents);
-        const events = await scanKeyEvents(depth);
-        if (events.length) {
-          s.keyEvents = events;
-          s.nextEventId = Math.max.apply(null, events.map(function(e){return e.id;}).concat([s.nextEventId - 1])) + 1;
-          save(); updatePrompt(); updateMeta(); renderTabContent();
-          $st.css('color', '#34d399').text('✅ Найдено ' + events.length + ' событий');
-          toast('Таймлайн обновлён', '#34d399', function() {
-            s.keyEvents = JSON.parse(snapshot);
-            save(); updatePrompt(); updateMeta(); renderTabContent();
-          });
-        } else {
-          $st.css('color', '#f59e0b').text('Новых событий не обнаружено');
-        }
-      } catch (e) { $st.css('color', '#f87171').text('✗ ' + e.message); }
-      $btn.prop('disabled', false).text('✦ Сканировать');
-    });
+    // Edit modal
+    $('#ct_edit_x,#ct_edit_cancel').on('click', closeEdit);
+    $('#ct_edit_modal').on('click', function (e) { if (e.target === this) closeEdit(); });
+    $('#ct_edit_save').on('click', saveEdit);
+    $('#ct_edit_word').on('keydown', e => { if (e.key === 'Enter') saveEdit(); });
+    $('#ct_edit_def').on('keydown', e => { if (e.key === 'Enter' && e.ctrlKey) saveEdit(); });
 
-    // Scan Deadlines
-    $('#calt_scan_dl_btn').off('click').on('click', async function () {
-      const $btn = $(this), $st = $('#calt_scan_dl_status');
-      const depth = +$('#calt_scan_dl_depth').val() || 20;
-      $btn.prop('disabled', true).text('Сканирую…');
-      $st.css('color', '#7a8499').text('Анализирую чат и лорбук…');
-      try {
-        const s = getSettings();
-        const snapshot = JSON.stringify(s.deadlines);
-        const deadlines = await scanDeadlines(depth);
-        if (deadlines.length) {
-          s.deadlines = deadlines;
-          s.nextDeadlineId = Math.max.apply(null, deadlines.map(function(e){return e.id;}).concat([s.nextDeadlineId - 1])) + 1;
-          save(); updatePrompt(); updateMeta(); renderTabContent();
-          $st.css('color', '#34d399').text('✅ Найдено ' + deadlines.length + ' событий');
-          toast('Дедлайны обновлены', '#fbbf24', function() {
-            s.deadlines = JSON.parse(snapshot);
-            save(); updatePrompt(); updateMeta(); renderTabContent();
-          });
-        } else {
-          $st.css('color', '#f59e0b').text('Грядущих событий не обнаружено');
-        }
-      } catch (e) { $st.css('color', '#f87171').text('✗ ' + e.message); }
-      $btn.prop('disabled', false).text('✦ Сканировать');
-    });
+    // Category editor
+    $('#ct_cat_editor_x').on('click', closeCategoryEditor);
+    $('#ct_cat_editor').on('click', function (e) { if (e.target === this) closeCategoryEditor(); });
+    $('#ct_cat_add_btn').on('click', () => openCategoryEditForm(null));
+    $('#ct_catedit_cancel').on('click', () => $('#ct_catedit_form').hide());
+    $('#ct_catedit_save').on('click', saveCategoryEdit);
 
-    // Rules save
-    $('#calt_rules_save_btn').off('click').on('click', async function() {
-      getSettings().calendarRules = $('#calt_rules_edit').val();
-      save(); await updatePrompt();
-      toast('Правила сохранены', '#a78bfa');
-      $('#calt_scan_rules_status').css('color', '#34d399').text('✅ Сохранено');
-    });
+    // Preview modal
+    $('#ct_preview_x').on('click', () => $('#ct_preview_modal').removeClass('ct-eopen'));
+    $('#ct_preview_modal').on('click', function (e) { if (e.target === this) $(this).removeClass('ct-eopen'); });
 
-    // Rules extract
-    $('#calt_rules_extract_btn').off('click').on('click', async function () {
-      const $btn = $(this), $st = $('#calt_scan_rules_status');
-      $btn.prop('disabled', true).text('Извлекаю…');
-      $st.css('color', '#7a8499').text('Анализирую лорбук…');
-      try {
-        const lore = getLorebook();
-        if (!lore) {
-          $st.css('color', '#f59e0b').text('Лорбук пуст или недоступен');
-          $btn.prop('disabled', false).text('✦ Извлечь из лорбука');
-          return;
-        }
-        const sys = 'You are a calendar system extractor. From the provided lorebook text, extract ONLY timekeeping-related information: calendar name, year system, month names, day/week names, seasons, lunar cycles, time units, special dates.\nFormat as clean concise lines like: [Key: value]. No markdown, no headers, no commentary. Max 25 lines. Preserve original terminology exactly.';
-        const result = await aiGenerate('LOREBOOK TEXT:\n' + lore.slice(0, 5000) + '\n\nExtract all calendar and timekeeping rules:', sys);
-        $('#calt_rules_edit').val(result.trim());
-        $st.css('color', '#34d399').text('✅ Извлечено — нажмите Сохранить');
-        toast('Правила извлечены из лорбука', '#a78bfa');
-      } catch (e) { $st.css('color', '#f87171').text('✗ ' + e.message); }
-      $btn.prop('disabled', false).text('✦ Извлечь из лорбука');
+    // Escape: close topmost layer
+    $(document).on('keydown', e => {
+      if (e.key !== 'Escape') return;
+      if ($('#ct_cat_editor').hasClass('ct-eopen'))   { closeCategoryEditor(); return; }
+      if ($('#ct_edit_modal').hasClass('ct-eopen'))    { closeEdit(); return; }
+      if ($('#ct_preview_modal').hasClass('ct-eopen')) { $('#ct_preview_modal').removeClass('ct-eopen'); return; }
+      if ($('#ct_tracker').hasClass('ct-open'))        { $('#ct_tracker').removeClass('ct-open'); }
     });
   }
 
-  // ─── Edit modal ───────────────────────────────────────────────────────────
+  function _renderAddCats() {
+    const cats = getCategories(getSettings());
+    $('#ct_add_cats').html(
+      Object.entries(cats).map(([k, c]) =>
+        `<button class="ct-add-cat" data-cat="${esc(k)}" style="--cc:${esc(c.color)}" title="${esc(c.label)}">${esc(c.icon)}</button>`
+      ).join('')
+    );
+  }
 
-  function openEditModal(id, type) {
+
+  /* ═══════════════════════════════════════════════════════════════════════════
+     §24  TRACKER RENDERING
+     ═══════════════════════════════════════════════════════════════════════════ */
+
+  function renderDrawer() {
     const s = getSettings();
-    const arr  = type === 'event' ? s.keyEvents : s.deadlines;
-    const item = arr.find(function(e) { return e.id === id; });
-    if (!item) return;
+    const cats = getCategories(s);
+    $('#ct_tr_title').text(s.langName);
+    $('#ct_tr_meta').text(`${ctx().name2 || s.chars[0] || '—'} · ${s.dict.length} words`);
 
-    $('.calt-edit-overlay').remove();
-    $('body').append(
-      '<div class="calt-edit-overlay calt-eopen">'
-      + '<div class="calt-edit-box">'
-      + '<div class="calt-edit-hdr"><span>' + (type === 'event' ? '⚔ Редактировать событие' : '⏳ Редактировать дедлайн') + '</span>'
-      + '<button class="calt-edit-x" id="calt_edit_x">✕</button></div>'
-      + '<div class="calt-edit-body">'
-      + '<div class="calt-elabel">Дата</div>'
-      + '<input class="calt-einput" id="calt_edit_date" value="' + esc(item.date || '') + '" placeholder="напр. 5 Jan 301 O.F.">'
-      + '<div class="calt-elabel" style="margin-top:8px">Описание</div>'
-      + '<textarea class="calt-etextarea" id="calt_edit_text">' + esc(item.text) + '</textarea>'
-      + '</div>'
-      + '<div class="calt-edit-footer">'
-      + '<button class="menu_button" id="calt_edit_cancel">Отмена</button>'
-      + '<button class="menu_button calt-save-btn" id="calt_edit_save">💾 Сохранить</button>'
-      + '</div></div></div>');
+    // ── Stats tab ────────────────────────────────────────────────
+    if (trackerTab === 'stats') {
+      $('#ct_cat_bar,#ct_add_row,#ct_last_injected').hide();
+      renderStatsTab();
+      return;
+    }
 
-    $('#calt_edit_x, #calt_edit_cancel').on('click', function() { $('.calt-edit-overlay').remove(); });
-    $('#calt_edit_save').on('click', function() {
-      const newDate = $('#calt_edit_date').val().trim();
-      const newText = $('#calt_edit_text').val().trim();
-      if (!newText) return;
-      item.date = newDate; item.text = newText;
-      save(); updatePrompt(); updateMeta(); renderTabContent();
-      $('.calt-edit-overlay').remove();
-      toast('Сохранено', '#34d399');
+    // ── Rules tab ────────────────────────────────────────────────
+    if (trackerTab === 'rules') {
+      $('#ct_cat_bar,#ct_add_row,#ct_last_injected').hide();
+      $('#ct_drawer_body').html(`
+        <div class="ct-rules-wrap">
+          <label class="ct-flabel" style="padding:0 4px">Phonetic rules</label>
+          <textarea id="ct_tr_rules_area" class="ct-rules-edit" rows="8">${esc(s.rules || DEFAULT_RULES)}</textarea>
+          <div class="ct-rules-actions">
+            <button class="menu_button" id="ct_tr_rules_reset_btn" style="font-size:11px;padding:4px 8px">↩ Reset</button>
+            <button class="menu_button ct-gen-btn" id="ct_tr_gen_rules_btn">✦ Generate</button>
+          </div>
+          <div id="ct_tr_rules_status" style="font-size:11px;min-height:15px;margin-top:4px"></div>
+
+          <label class="ct-flabel" style="padding:0 4px;margin-top:12px">Grammar patterns</label>
+          <textarea id="ct_tr_grammar_area" class="ct-rules-edit" rows="6">${esc(s.grammarRules || DEFAULT_GRAMMAR)}</textarea>
+          <div class="ct-rules-actions">
+            <button class="menu_button" id="ct_tr_grammar_reset_btn" style="font-size:11px;padding:4px 8px">↩ Reset</button>
+            <button class="menu_button ct-gen-btn" id="ct_tr_gen_grammar_btn">✦ Generate</button>
+          </div>
+          <div id="ct_tr_grammar_status" style="font-size:11px;min-height:15px;margin-top:4px"></div>
+        </div>
+      `);
+      let rt2, gt2;
+      $('#ct_tr_rules_area').on('input', function () {
+        clearTimeout(rt2); rt2 = setTimeout(() => {
+          getSettings().rules = this.value; $('#ct_rules_area').val(this.value);
+          ctx().saveSettingsDebounced(); updatePrompt();
+        }, 600);
+      });
+      $('#ct_tr_rules_reset_btn').on('click', () => {
+        const v = DEFAULT_RULES;
+        $('#ct_tr_rules_area,#ct_rules_area').val(v);
+        getSettings().rules = v; ctx().saveSettingsDebounced(); updatePrompt();
+      });
+      $('#ct_tr_gen_rules_btn').on('click', () => generateRules('ct_tr_gen_rules_btn', 'ct_tr_rules_area', 'ct_tr_rules_status', 'phonetic'));
+
+      $('#ct_tr_grammar_area').on('input', function () {
+        clearTimeout(gt2); gt2 = setTimeout(() => {
+          getSettings().grammarRules = this.value; $('#ct_grammar_area').val(this.value);
+          ctx().saveSettingsDebounced(); updatePrompt();
+        }, 600);
+      });
+      $('#ct_tr_grammar_reset_btn').on('click', () => {
+        const v = DEFAULT_GRAMMAR;
+        $('#ct_tr_grammar_area,#ct_grammar_area').val(v);
+        getSettings().grammarRules = v; ctx().saveSettingsDebounced(); updatePrompt();
+      });
+      $('#ct_tr_gen_grammar_btn').on('click', () => generateRules('ct_tr_gen_grammar_btn', 'ct_tr_grammar_area', 'ct_tr_grammar_status', 'grammar'));
+      return;
+    }
+
+    // ── Words tab ────────────────────────────────────────────────
+    $('#ct_cat_bar,#ct_add_row').show();
+    if (_lastInjected.length) _renderLastInjectedBanner(s.dict.filter(w => _lastInjected.includes(w.id)));
+    renderCatBar();
+    renderWordList();
+  }
+
+  function renderCatBar() {
+    const s = getSettings(), cats = getCategories(s), bc = {};
+    s.dict.forEach(w => { bc[w.cat] = (bc[w.cat] || 0) + 1; });
+    $('#ct_cat_bar').html(`
+      <button class="ct-cat-chip ${trackerCat === 'all' ? 'active' : ''}" data-cat="all">All <span class="ct-n">${s.dict.length}</span></button>
+      ${Object.entries(cats).map(([k, c]) => {
+        const n = bc[k] || 0;
+        if (!n) return '';
+        return `<button class="ct-cat-chip ${trackerCat === k ? 'active' : ''}" data-cat="${esc(k)}" style="--cc:${esc(c.color)}">${esc(c.icon)} ${esc(c.label)} <span class="ct-n">${n}</span></button>`;
+      }).join('')}
+    `);
+    $('#ct_cat_bar .ct-cat-chip').on('click', function () {
+      trackerCat = this.dataset.cat;
+      renderCatBar(); renderWordList();
     });
-    $('#calt_edit_text').on('keydown', function(e) { if (e.key === 'Enter' && e.ctrlKey) $('#calt_edit_save').click(); });
   }
 
-  // ─── Export / Import ──────────────────────────────────────────────────────
+  function renderWordList() {
+    const s     = getSettings();
+    const cats  = getCategories(s);
+    const txt   = recentText();
+    const tokens = tokenize(txt);
 
-  function exportData() {
+    let list = trackerCat === 'all' ? s.dict : s.dict.filter(w => w.cat === trackerCat);
+    if (trackerSearch.trim()) {
+      const q = trackerSearch.toLowerCase();
+      list = list.filter(w => w.word.toLowerCase().includes(q) || w.def.toLowerCase().includes(q));
+    }
+
+    if      (trackerSort === 'alpha')  list = list.slice().sort((a, b) => a.word.localeCompare(b.word));
+    else if (trackerSort === 'score')  list = list.slice().sort((a, b) => scoreWord(b, txt, tokens) - scoreWord(a, txt, tokens));
+    else if (trackerSort === 'uses')   list = list.slice().sort((a, b) => (b.uses || 0) - (a.uses || 0));
+    else if (trackerSort === 'recent') list = list.slice().sort((a, b) => (b.lastUsed || 0) - (a.lastUsed || 0));
+
+    const body = $('#ct_drawer_body');
+    if (!list.length) {
+      body.html(`<div class="ct-empty">No words yet. Click <b>+ Add</b> or let the model forge them ✦</div>`);
+      return;
+    }
+
+    body.html(list.map(w => {
+      const c     = cats[w.cat] || cats.other;
+      const def   = w.def.length > 130 ? w.def.slice(0, 127) + '…' : w.def;
+      const chars = (w.chars || []).join(', ');
+      const isNew = _sessionNewIds.has(w.id);
+      const sc    = scoreWord(w, txt, tokens);
+      const scBar = Math.min(Math.round(sc * 10), 100);
+      return `<div class="ct-word-row${w.disabled ? ' ct-disabled-row' : ''}" data-id="${w.id}">
+        <span class="ct-wr-dot" style="background:${esc(c.color)}"></span>
+        <div class="ct-wr-body">
+          <div class="ct-wr-top">
+            <span class="ct-wr-word">${esc(w.word)}</span>
+            ${w.pinned   ? '<span class="ct-pin">⚓</span>' : ''}
+            ${w.auto     ? '<span class="ct-auto">auto</span>' : ''}
+            ${isNew      ? '<span class="ct-new">✦ new</span>' : ''}
+            ${w.disabled ? '<span class="ct-auto" style="color:#888">paused</span>' : ''}
+            <span class="ct-score-bar" title="Score: ${sc.toFixed(1)}"><span class="ct-score-fill" style="width:${scBar}%;background:${esc(c.color)}"></span></span>
+          </div>
+          <div class="ct-wr-def">${esc(def)}</div>
+          ${chars ? `<div class="ct-wr-chars">◈ ${esc(chars)}</div>` : ''}
+          ${(w.relations||[]).length ? `<div class="ct-wr-chars" style="color:rgba(167,139,250,0.5)">↔ ${w.relations.map(r=>`${r.type}→#${r.targetId}`).join(', ')}</div>` : ''}
+        </div>
+        <div class="ct-wr-acts">
+          <span class="ct-uses" title="Times injected">↻${w.uses || 0}</span>
+          <button class="ct-dis-btn" data-id="${w.id}" title="${w.disabled ? 'Enable' : 'Pause'}">${w.disabled ? '▶' : '⏸'}</button>
+          <button class="ct-edit-btn" data-id="${w.id}" title="Edit">✎</button>
+          <button class="ct-del-btn" data-id="${w.id}" title="Delete">✕</button>
+        </div>
+      </div>`;
+    }).join(''));
+
+    body.find('.ct-edit-btn').on('click', function (e) { e.stopPropagation(); openEdit(+this.dataset.id); });
+    body.find('.ct-del-btn').on('click', function (e) { e.stopPropagation(); deleteWord(+this.dataset.id); });
+    body.find('.ct-dis-btn').on('click', function (e) { e.stopPropagation(); toggleDisableWord(+this.dataset.id); });
+    body.find('.ct-word-row').on('click', function () { openEdit(+this.dataset.id); });
+  }
+
+  /* ═══════════════════════════════════════════════════════════════════════════
+     §25  STATS TAB
+     ═══════════════════════════════════════════════════════════════════════════ */
+
+  function renderStatsTab() {
     const s = getSettings();
-    const blob = new Blob([JSON.stringify({
-      currentDate: s.currentDate, keyEvents: s.keyEvents,
-      deadlines: s.deadlines, calendarRules: s.calendarRules,
-    }, null, 2)], { type: 'application/json' });
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = 'calendar_tracker_' + Date.now() + '.json';
-    a.click();
-    toast('Данные экспортированы', '#34d399');
+    const cats = getCategories(s);
+    const dict = s.dict;
+
+    // Category distribution
+    const catCounts = {};
+    dict.forEach(w => { catCounts[w.cat] = (catCounts[w.cat] || 0) + 1; });
+
+    // Most used
+    const topUsed = [...dict].sort((a, b) => (b.uses || 0) - (a.uses || 0)).slice(0, 5);
+
+    // Recently created
+    const recentWords = [...dict].filter(w => w.createdAt).sort((a, b) => b.createdAt - a.createdAt).slice(0, 5);
+
+    // Auto vs manual
+    const autoCount   = dict.filter(w => w.auto).length;
+    const manualCount = dict.length - autoCount;
+
+    // Words with history
+    const evolvedCount = dict.filter(w => w.history && w.history.length > 0).length;
+
+    const body = $('#ct_drawer_body');
+    body.html(`
+      <div class="ct-stats-wrap">
+        <div class="ct-stats-section">
+          <div class="ct-stats-title">Overview</div>
+          <div class="ct-stats-grid">
+            <div class="ct-stat-card">
+              <div class="ct-stat-num">${dict.length}</div>
+              <div class="ct-stat-label">Total words</div>
+            </div>
+            <div class="ct-stat-card">
+              <div class="ct-stat-num">${Object.keys(cats).filter(k => catCounts[k]).length}</div>
+              <div class="ct-stat-label">Active categories</div>
+            </div>
+            <div class="ct-stat-card">
+              <div class="ct-stat-num">${autoCount} / ${manualCount}</div>
+              <div class="ct-stat-label">Auto / Manual</div>
+            </div>
+            <div class="ct-stat-card">
+              <div class="ct-stat-num">${evolvedCount}</div>
+              <div class="ct-stat-label">Evolved words</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="ct-stats-section">
+          <div class="ct-stats-title">Category distribution</div>
+          ${Object.entries(catCounts).sort((a,b)=>b[1]-a[1]).map(([k, n]) => {
+            const c = cats[k] || cats.other;
+            const pct = dict.length ? Math.round(n / dict.length * 100) : 0;
+            return `<div class="ct-stat-bar-row">
+              <span class="ct-stat-bar-label" style="color:${esc(c.color)}">${esc(c.icon)} ${esc(c.label)}</span>
+              <div class="ct-stat-bar"><div class="ct-stat-bar-fill" style="width:${pct}%;background:${esc(c.color)}"></div></div>
+              <span class="ct-stat-bar-num">${n}</span>
+            </div>`;
+          }).join('')}
+        </div>
+
+        <div class="ct-stats-section">
+          <div class="ct-stats-title">Most used</div>
+          ${topUsed.map(w => {
+            const c = cats[w.cat] || cats.other;
+            return `<div class="ct-stat-word-row">
+              <span style="color:${esc(c.color)}">${esc(c.icon)}</span>
+              <span class="ct-wr-word" style="font-size:12px">${esc(w.word)}</span>
+              <span class="ct-uses">↻${w.uses || 0}</span>
+            </div>`;
+          }).join('') || '<div class="ct-hint">No usage data yet</div>'}
+        </div>
+
+        <div class="ct-stats-section">
+          <div class="ct-stats-title">Recently forged</div>
+          ${recentWords.map(w => {
+            const c = cats[w.cat] || cats.other;
+            const date = w.createdAt ? new Date(w.createdAt).toLocaleDateString() : '—';
+            return `<div class="ct-stat-word-row">
+              <span style="color:${esc(c.color)}">${esc(c.icon)}</span>
+              <span class="ct-wr-word" style="font-size:12px">${esc(w.word)}</span>
+              <span class="ct-uses">${date}</span>
+            </div>`;
+          }).join('') || '<div class="ct-hint">No dated words</div>'}
+        </div>
+      </div>
+    `);
   }
 
-  function importData() {
-    const inp = document.createElement('input');
-    inp.type = 'file'; inp.accept = '.json';
-    inp.onchange = function(e) {
-      const file = e.target.files[0]; if (!file) return;
-      const reader = new FileReader();
-      reader.onload = function(ev) {
-        try {
-          const data = JSON.parse(ev.target.result);
-          const s = getSettings();
-          if (data.currentDate)              { s.currentDate = data.currentDate; $('#calt_current_date, #calt_modal_date').val(s.currentDate); }
-          if (Array.isArray(data.keyEvents)) s.keyEvents  = data.keyEvents;
-          if (Array.isArray(data.deadlines)) s.deadlines  = data.deadlines;
-          if (data.calendarRules)            s.calendarRules = data.calendarRules;
-          save(); updatePrompt(); updateMeta(); renderTabContent();
-          toast('Данные импортированы', '#34d399');
-        } catch (err) { toast('Ошибка импорта — неверный формат файла', '#f87171'); }
-      };
-      reader.readAsText(file);
-    };
-    inp.click();
+  /* ═══════════════════════════════════════════════════════════════════════════
+     §26  CHAT MESSAGE PROCESSING
+     ═══════════════════════════════════════════════════════════════════════════ */
+
+  const _cleanedMsgs = new Set();
+
+  function processChatMessage(idx) {
+    const msg = (ctx().chat || [])[idx];
+    if (!msg || msg.is_user) return;
+    const text = msg.mes || '';
+
+    captureFromMessage(text);
+    captureExamples(text);
+
+    if (text && /\[CT_WORD:/i.test(text)) {
+      if (!_cleanedMsgs.has(idx)) {
+        _cleanedMsgs.add(idx);
+        msg.mes = cleanMarkers(text);
+      }
+      const el = document.querySelector(`[mesid="${idx}"] .mes_text`);
+      if (el) el.innerHTML = cleanMarkers(el.innerHTML);
+    }
   }
 
-  // ─── Auto-scan ────────────────────────────────────────────────────────────
+  /* ═══════════════════════════════════════════════════════════════════════════
+     §27  EVENTS
+     ═══════════════════════════════════════════════════════════════════════════ */
 
-  async function tryAutoScan() {
-    const s = getSettings();
-    if (!s.autoScan || !s.enabled) return;
-    const chat = ctx().chat || [];
-    if (chat.length <= _lastAutoLen || (chat.length - _lastAutoLen) < 10) return;
-    _lastAutoLen = chat.length;
-
-    clearTimeout(_autoScanTimer);
-    _autoScanTimer = setTimeout(async function() {
-      try {
-        const evSnap = JSON.stringify(s.keyEvents);
-        const dlSnap = JSON.stringify(s.deadlines);
-        const results = await Promise.all([scanKeyEvents(s.scanDepth), scanDeadlines(s.scanDepth)]);
-        const events = results[0], deadlines = results[1];
-        let changed = false;
-        if (events.length)    { s.keyEvents  = events;    s.nextEventId    = Math.max.apply(null, events.map(function(e){return e.id;}).concat([s.nextEventId-1]))+1;    changed = true; }
-        if (deadlines.length) { s.deadlines  = deadlines; s.nextDeadlineId = Math.max.apply(null, deadlines.map(function(e){return e.id;}).concat([s.nextDeadlineId-1]))+1; changed = true; }
-        if (changed) {
-          save(); updatePrompt(); updateMeta();
-          if ($('#calt_modal').hasClass('calt-mopen')) renderTabContent();
-          toast('Таймлайн обновлён автоматически', '#34d399', function() {
-            s.keyEvents  = JSON.parse(evSnap);
-            s.deadlines  = JSON.parse(dlSnap);
-            save(); updatePrompt(); updateMeta();
-            if ($('#calt_modal').hasClass('calt-mopen')) renderTabContent();
-          });
-        }
-      } catch (e) { console.warn('[CalTracker] auto-scan failed:', e.message); }
-    }, 2000);
-  }
-
-  // ─── Utility ──────────────────────────────────────────────────────────────
-
-  function esc(s) {
-    return String(s)
-      .replace(/&/g, '&amp;').replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-  }
-
-  // ─── Wire ST events ───────────────────────────────────────────────────────
-
-  function wireEvents() {
+  function wireChatEvents() {
     const { eventSource, event_types } = ctx();
 
-    eventSource.on(event_types.APP_READY, async function() {
+    eventSource.on(event_types.APP_READY, () => {
+      ensureTracker();
       mountSettingsUi();
-      await updatePrompt();
+      updatePrompt();
     });
 
-    eventSource.on(event_types.CHAT_CHANGED, async function() {
-      _lastAutoLen = 0;
-      await updatePrompt(); updateMeta();
-      if ($('#calt_modal').hasClass('calt-mopen')) renderTabContent();
+    eventSource.on(event_types.CHAT_CHANGED, () => {
+      _cleanedMsgs.clear();
+      updatePrompt();
+      if ($('#ct_tracker').hasClass('ct-open')) renderDrawer();
     });
 
-    eventSource.on(event_types.MESSAGE_RECEIVED, async function() {
-      await updatePrompt();
-      await tryAutoScan();
+    eventSource.on(event_types.MESSAGE_SENT, () => {
+      updatePrompt();
+    });
+
+    eventSource.on(event_types.MESSAGE_RECEIVED, (idx) => {
+      processChatMessage(idx);
+      updatePrompt();
+      tryEvolve();
+    });
+
+    eventSource.on(event_types.MESSAGE_UPDATED, (idx) => {
+      _cleanedMsgs.delete(idx);
+      processChatMessage(idx);
+      updatePrompt();
     });
 
     if (event_types.GENERATION_ENDED) {
-      eventSource.on(event_types.GENERATION_ENDED, async function() {
-        await updatePrompt();
+      eventSource.on(event_types.GENERATION_ENDED, () => {
+        const chat = ctx().chat || [], last = chat.length - 1;
+        if (last >= 0 && !chat[last].is_user) processChatMessage(last);
+        updatePrompt();
       });
     }
   }
 
-  // ─── Boot ─────────────────────────────────────────────────────────────────
+  /* ═══════════════════════════════════════════════════════════════════════════
+     §28  BOOT
+     ═══════════════════════════════════════════════════════════════════════════ */
 
-  jQuery(function() {
+  jQuery(() => {
     try {
-      wireEvents();
-      console.log('[Calendar Tracker v1.1] ✦ loaded');
+      wireChatEvents();
+      console.log('[Citadel Tongue v8] ✦ loaded');
     } catch (e) {
-      console.error('[Calendar Tracker] init failed', e);
+      console.error('[Citadel Tongue] init failed', e);
     }
   });
 
