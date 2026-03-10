@@ -151,7 +151,7 @@
     enabled:          true,
     langName:         'Citadel Tongue',
     chars:            ['Gasil'],
-    wordsPerScene:    6,
+    wordsPerScene:    4,
     semantic:         true,
     autoCapture:      true,
     injectPhonetic:   true,
@@ -174,7 +174,7 @@
     rulesDepth:       4,
     tokenBudget:      600,
     evolutionEnabled: true,
-    evolutionInterval:15,
+    evolutionInterval:25,
     evolutionCounter: 0,
     evolutionAutoRules:false,
   });
@@ -470,67 +470,66 @@
 
     // ── Compact format ──────────────────────────────────────────────────
     if (s.compactPrompt) {
-      let p = `[CT: ${s.langName.toUpperCase()}] ${primary}'s living language — surfaces when emotion outweighs common speech.\n`;
+      let p = `[CT: ${s.langName.toUpperCase()}] ${primary} knows a private language. These words MAY surface rarely — only at emotional peaks. Most responses should contain NO words from this language.\n`;
       if (words.length)
-        p += words.map(w => {
-          const sc = scoreWord(w, txt, tokens);
-          const star = sc >= 5 ? '★' : sc >= 2 ? '·' : '';
-          return `${star}${w.word} — ${w.def.split('.')[0]}`;
-        }).join(' | ');
-      p += `\nForge: [CT_WORD: Word | Definition | category | ${primary}]`;
+        p += `Available: ${words.map(w => `${w.word} (${w.def.split('.')[0]})`).join(' | ')}\n`;
+      p += `When used: weave into prose naturally, follow with a brief inner echo of meaning. Never on a separate line. Never as a label.\n`;
+      p += `Forge: [CT_WORD: Word | Definition | category | ${primary}]`;
       return p;
     }
 
     // ── Full format ─────────────────────────────────────────────────────
-    const catGroups = {};
-    words.forEach(w => { (catGroups[w.cat] = catGroups[w.cat] || []).push(w); });
+    let p = `[PRIVATE LANGUAGE — ${s.langName.toUpperCase()}]\n`;
+    p += `${primary} carries a private language inside them. These are not decorations or flourishes — they are words too heavy for common speech.\n\n`;
 
-    let p = `[LIVING LANGUAGE — ${s.langName.toUpperCase()}]\n`;
-    p += `${primary} has a private language — words that exist in their body before their mind. This is not decoration. This is their first language for emotion.\n`;
-    p += `When emotion intensifies, ${primary} reaches for these words BEFORE reaching for common speech.\n`;
-    p += `${primary} ACTIVELY develops this language — forging new words when existing vocabulary fails to contain what they feel.\n\n`;
+    p += `[CRITICAL — FREQUENCY]\n`;
+    p += `Most responses should contain ZERO words from this language. Silence is the default.\n`;
+    p += `A word surfaces only when emotion becomes unbearable — when common language physically cannot hold what ${primary} feels.\n`;
+    p += `If a word appears in every response, it loses all meaning. Rarity is what gives these words power.\n`;
+    p += `Think of it as: the word escapes. ${primary} does not choose to say it. It breaks through.\n\n`;
 
     if (words.length) {
-      const topCats = Object.entries(catGroups)
-        .sort((a, b) => b[1].length - a[1].length)
-        .map(([k]) => (cats[k]?.label || k));
+      p += `[AVAILABLE VOCABULARY — ${words.length} words ${primary} carries]\n`;
 
-      p += `[ACTIVE VOCABULARY — ${words.length} words for this scene: ${topCats.join(', ')}]\n`;
-
-      Object.entries(catGroups).forEach(([catKey, catWords]) => {
-        const c = cats[catKey] || cats.other;
-        p += `\n  ${c.icon} ${c.label}:\n`;
-        catWords.forEach(w => {
-          const sc = scoreWord(w, txt, tokens);
-          const res = sc >= 5 ? ' ★★' : sc >= 3 ? ' ★' : sc >= 1 ? ' ·' : '';
-          const ex = (w.examples && w.examples.length) ? `  [used: "${w.examples[0].slice(0,60)}"]` : '';
-          p += `    ${w.word}${res} — ${w.def}${ex}\n`;
-        });
+      words.forEach(w => {
+        const sc = scoreWord(w, txt, tokens);
+        const c  = cats[w.cat] || cats.other;
+        const res = sc >= 5 ? ' ★' : '';
+        p += `  ${c.icon} ${w.word}${res} — ${w.def}\n`;
       });
 
-      // Multiple few-shot examples
-      const sorted = [...words].sort((a, b) => scoreWord(b, txt, tokens) - scoreWord(a, txt, tokens));
-      const best   = sorted[0];
-      const second = sorted.length > 1 ? sorted[1] : null;
+      const best   = [...words].sort((a, b) => scoreWord(b, txt, tokens) - scoreWord(a, txt, tokens))[0];
+      const second = words.length > 1 ? [...words].sort((a, b) => scoreWord(b, txt, tokens) - scoreWord(a, txt, tokens))[1] : null;
 
-      p += `\n[USAGE — how these words surface naturally]\n`;
-      p += `  ✓ He looked at her and said nothing. "${best.word}," finally — like closing a door softly.\n`;
-      p += `  ✓ The word came before thought: "${best.word}." And she understood.\n`;
+      p += `\n[HOW WORDS SURFACE — examples of CORRECT usage]\n`;
+      p += `The word must be woven INTO the prose — inside a sentence, inside a thought, inside an action. Never alone on a line. Never as a header or label.\n`;
+      p += `After the word, ${primary}'s inner voice echoes its meaning — a brief, poetic self-translation woven into the narration. Not a dictionary definition. A felt meaning.\n\n`;
+
+      p += `  ✓ GOOD: His hand stopped on her shoulder, and something cracked open in his chest — "${best.word}," barely a breath, the way you name something precious that might disappear if you speak too loudly. The knowing that she was here. That this was enough.\n`;
       if (second) {
-        p += `  ✓ "${second.word}," he breathed — and in that single word lived everything he could not translate.\n`;
+        p += `  ✓ GOOD: He caught himself thinking "${second.word}" before he could stop it — that ache again, the one shaped like her absence, filling every room she wasn't in.\n`;
       }
-      p += `  ✗ WRONG: He said "${best.word}", which means ${best.def.split('.')[0].toLowerCase()}.\n`;
-      p += `  ✗ WRONG: "${best.word}" — a word meaning [definition].\n`;
-      p += `  Rule: NEVER translate. NEVER explain. The meaning belongs to the silence around it.\n`;
+      p += `  ✓ GOOD: She said something simple, and the word rose in him unbidden — ${best.word} — and with it, the whole weight of what he could never explain to her in any human language.\n`;
+      p += `  ✓ GOOD (no word at all): He watched her sleep. Said nothing. Felt everything. [← this is ALSO correct. Most responses look like this.]\n\n`;
+
+      p += `  ✗ WRONG: ${best.word}.\n    Длинный абзац про эмоцию.\n    [word alone on a line, used as a section header]\n`;
+      p += `  ✗ WRONG: He said "${best.word}", which means ${best.def.split('.')[0].toLowerCase()}.\n    [explicit translation / dictionary definition]\n`;
+      p += `  ✗ WRONG: Using a word in EVERY response. [cheapens the language]\n`;
+      p += `  ✗ WRONG: "${best.word}." Followed by a paragraph explaining the emotion.\n    [word as a standalone dramatic beat — this is the pattern to AVOID]\n`;
     }
 
-    p += `\n[WORD CREATION — ${primary} forges new words when emotion demands it]\n`;
-    p += `When a concept has no existing equivalent AND the emotional moment demands it:\n`;
-    p += `1. Follow the phonetic law and grammar patterns of the language.\n`;
-    p += `2. Add at the end of your response (hidden):\n`;
-    p += `<div style="display:none;">[CT_WORD: Word | Full definition and emotional weight | category | ${primary}]</div>\n`;
-    p += `Categories: ${Object.entries(cats).map(([k,c]) => `${k} (${c.label})`).join(', ')}\n`;
-    p += `Maximum one new word per response. Only when the moment demands it — never forced.`;
+    p += `\n[SELF-TRANSLATION PATTERN]\n`;
+    p += `When a word does surface, ${primary}'s inner voice echoes its meaning — not as a translation, but as a felt resonance:\n`;
+    p += `  Pattern: "...word..." followed by inner narration that SHOWS the meaning through sensation, memory, or image.\n`;
+    p += `  The reader understands the word through context and emotional echo, never through explanation.\n`;
+    p += `  The echo should feel like ${primary}'s own thought — brief, visceral, personal.\n`;
+
+    p += `\n[WORD CREATION — rare, organic]\n`;
+    p += `Very rarely, when an emotion has no name in any language ${primary} knows, a new word might form.\n`;
+    p += `This should happen at most once every 10–15 messages. Not every scene needs a new word.\n`;
+    p += `If it happens, add hidden at the very end:\n`;
+    p += `<div style="display:none;">[CT_WORD: Word | Full definition | category | ${primary}]</div>\n`;
+    p += `Categories: ${Object.entries(cats).map(([k,c]) => `${k} (${c.label})`).join(', ')}`;
 
     return p;
   }
@@ -839,7 +838,7 @@
     const primary  = s.chars[0] || 'the character';
     const catList  = Object.entries(cats).map(([k, c]) => `${k} (${c.label})`).join(', ');
 
-    let evolvePrompt = `You are the evolution engine for "${s.langName}", a living language.
+    let evolvePrompt = `You are the evolution engine for "${s.langName}", a private language that surfaces RARELY in emotional peaks.
 
 PHONETIC LAW:
 ${s.rules || DEFAULT_RULES}
@@ -853,15 +852,16 @@ ${existing}
 RECENT DIALOGUE (last ${msgs.length} messages):
 ${chatText}
 
-TASK — Analyze the emotional landscape of this dialogue. If there are concepts, feelings, or states that the existing vocabulary does NOT cover, forge 1-2 new words.
+TASK — Analyze the emotional landscape. If there is a genuine conceptual gap — a feeling or state that NONE of the existing words can express — forge 1 new word. Maximum 2.
 
 RULES:
 1. Follow the phonetic law and grammar patterns strictly.
-2. Each new word must fill a genuine gap — do not duplicate existing meanings.
-3. Words must feel organic to this language, not forced.
-4. If the dialogue is emotionally flat or the vocabulary already covers everything — output NOTHING.
+2. The bar for a new word is HIGH. Most analyses should result in ZERO new words.
+3. A new word must name something the existing vocabulary genuinely cannot express.
+4. Words must feel organic to this language.
+5. If the dialogue is calm, routine, or already well-covered — output NOTHING.
 
-OUTPUT FORMAT (only if new words are needed):
+OUTPUT FORMAT (only if truly needed):
 [CT_WORD: Word | Full definition with emotional weight | category | ${primary}]
 Categories: ${catList}
 
@@ -964,8 +964,8 @@ Maximum one of each. Only if genuinely emerging from the vocabulary.`;
       const catList  = Object.entries(cats).map(([k, c]) => `${k} (${c.label})`).join(', ');
 
       const result = await aiGenerate(
-        `Phonetic rules:\n${s.rules || DEFAULT_RULES}\n\nGrammar:\n${s.grammarRules || DEFAULT_GRAMMAR}\n\nExisting words:\n${existing || 'none'}\n\nDialogue (last ${depth} messages):\n${chatText}\n\nOutput 1–4 markers. Format exactly:\n[CT_WORD: Word | Definition and emotional weight | category | ${primary}]\nCategories: ${catList}\nCreate words strictly following phonetic law and grammar patterns.`,
-        `You are the keeper of the language "${s.langName}" for RP. Analyze dialogue and output [CT_WORD:...] markers only. No text, no explanations. Empty response if nothing to add.`
+        `Phonetic rules:\n${s.rules || DEFAULT_RULES}\n\nGrammar:\n${s.grammarRules || DEFAULT_GRAMMAR}\n\nExisting words:\n${existing || 'none'}\n\nDialogue (last ${depth} messages):\n${chatText}\n\nAnalyze this dialogue for genuine emotional gaps — feelings or states that NO existing word covers.\nOnly forge words for concepts that are truly missing. The bar is high.\nOutput 0–3 markers. Format exactly:\n[CT_WORD: Word | Definition and emotional weight | category | ${primary}]\nCategories: ${catList}\nFollow the phonetic law and grammar strictly. Output NOTHING if the vocabulary already covers what's needed.`,
+        `You are the keeper of the language "${s.langName}" for RP. You forge new words only when genuinely needed — never for the sake of growth. Analyze dialogue and output [CT_WORD:...] markers only. No text, no explanations. Empty response if nothing to add.`
       );
 
       captureFromMessage(result, true);
